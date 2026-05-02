@@ -1,0 +1,18 @@
+[[config]]
+path_to_protobuf = "src/proto/"
+emit_interval_ms = 10
+staleness_ms = 300
+
+[[inputs]]
+address = "127.0.0.1:28080"
+priority = 1
+protobuf = "RoveTelemetry.proto"
+
+[[inputs]]
+address = "127.0.0.1:28081"
+priority = 2
+protobuf = "RoveTelemetry.proto"
+
+[[outputs]]
+address = "127.0.0.1:29000"
+protobuf = "RoveTelemetry.proto"

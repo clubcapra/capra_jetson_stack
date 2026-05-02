@@ -1,0 +1,18 @@
+[api]
+host = "192.168.2.2"
+http_port = 8080
+
+[endpoints]
+estop_port = 9100
+control_port = 9101
+
+[strategies]
+base_port = 9200
+
+[robot]
+left_nodes = [32, 33]
+right_nodes = [31, 34]
+drive_mode = "torque"        # "velocity" (rev/s) or "torque" (Nm)
+max_velocity = 20.0          # rev/s — used when drive_mode = "velocity"
+max_torque = 20.0             # Nm   — used when drive_mode = "torque"
+command_interval_ms = 20     # how often strategies send drive commands
