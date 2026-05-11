@@ -1,8 +1,0 @@
-syntax = "proto3";
-package telemetry;
-
-message Battery {
-    float volt = 1;
-    float amp = 2;
-    float temp_c = 3;
-}

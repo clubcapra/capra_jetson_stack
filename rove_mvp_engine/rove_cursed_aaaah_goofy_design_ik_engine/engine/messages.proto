@@ -1,0 +1,87 @@
+// IK engine wire protocol.
+//
+// Three UDP sockets, each unidirectional:
+//   * JOINTS  port (default 9501): client → engine.  JointState messages
+//                                  carrying current joint positions.
+//   * TWIST   port (default 9502): client → engine.  Twist messages
+//                                  carrying desired Cartesian motion +
+//                                  the IK mode flag for this packet.
+//   * VELOCS  port (default 9503): engine → client.  JointCommand
+//                                  messages carrying the IK result for
+//                                  each Twist received.
+//
+// Every datagram is a single, self-contained Protobuf-serialized
+// message of one of the types below. Field numbers are stable; new
+// fields must use unused numbers (proto3 allows unknown-field skip).
+
+syntax = "proto3";
+package forgebot.ik;
+
+enum IKMode {
+  // Resolved-rate motion control. Engine treats `Twist` as a desired
+  // Cartesian velocity and returns joint VELOCITIES (rad/s, m/s) via
+  // q_dot = J⁺(q) · v. Stateless, fast, intended for ≥200 Hz control.
+  RESOLVED_RATE = 0;
+  // Full position-IK. Engine integrates the incoming twist over a
+  // fixed dt to a moving target pose, then runs the damped-LS position
+  // solver and returns joint POSITIONS (rad, m). Slower, better for
+  // low-rate scripted moves.
+  POSITION_IK = 1;
+}
+
+message Orientation {
+  float yaw = 1;     // rotation about Z (rad if absolute, [-1,1] if normalized)
+  float pitch = 2;   // rotation about Y
+  float roll = 3;    // rotation about X
+}
+
+message Vector3 {
+  float x = 1;
+  float y = 2;
+  float z = 3;
+}
+
+// Generic name/value pair used for joint dicts.
+// Names are joint entity IDs (e.g. "ent_joint_a3f2b1c0") as exported
+// in chain.json. The morphing layer is expected to translate to/from
+// the user's preferred joint naming.
+message NamedFloat {
+  string name = 1;
+  float value = 2;
+}
+
+// JOINTS port input: the real robot's current joint state.
+// `value` is in radians (revolute) or meters (prismatic).
+message JointState {
+  repeated NamedFloat joints = 1;
+  uint64 t_us = 2;   // sender wall-clock timestamp, microseconds (monotonic ok)
+}
+
+// TWIST port input: desired Cartesian motion + per-packet IK mode.
+//
+// Per the agreed-on protocol, `orientation` and `position` are
+// NORMALIZED scalars in [-1, 1]. The engine scales them by the
+// configured `max_lin_vel` (m/s) and `max_ang_vel` (rad/s) to get the
+// actual twist before solving.
+message Twist {
+  Orientation orientation = 1;
+  Vector3 position = 2;
+  IKMode mode = 3;
+  uint64 t_us = 4;
+}
+
+// VELOCS port output: per-joint IK result.
+//
+// The semantics of `joints[i].value` depend on `mode`:
+//   RESOLVED_RATE → joint VELOCITY (rad/s for revolute, m/s for prismatic)
+//   POSITION_IK   → joint POSITION (rad, m)
+//
+// `converged` and `residual` are only meaningful for POSITION_IK. For
+// RESOLVED_RATE, converged is always true and residual is 0.0.
+message JointCommand {
+  repeated NamedFloat joints = 1;
+  IKMode mode = 2;
+  uint64 t_us = 3;
+  bool converged = 4;
+  float residual = 5;
+}

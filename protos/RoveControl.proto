@@ -1,0 +1,37 @@
+syntax = "proto3";
+package telemetry;
+
+import "proto/core/Orientation.proto";
+import "proto/core/Vector3.proto";
+
+message RoveControl {
+    Tracks tracks = 1;
+    Flippers flippers = 2;
+    Ovis ovis = 3;
+    Gripper gripper = 4;
+    
+    uint64 timestamp_us = 5;
+}
+
+// normalized scalar values for tracks ( -1.0 to 1.0 )
+message Tracks {
+    float left_vel = 1;
+    float right_vel = 2;
+}
+
+// normalized pos addition values ( -1, 0, 1 )
+message Flippers {
+    sint32 fl = 1;
+    sint32 fr = 2;
+    sint32 rl = 3;
+    sint32 rr = 4;
+}
+
+message Ovis {
+    Orientation orientation = 1; // normalized scalar value for angles ( -1.0 to 1.0 )
+    Vector3 position = 2; // normalized scalar values for accelerations ( -1.0 to 1.0 )
+}
+
+message Gripper {
+    bool open_state = 1;
+}

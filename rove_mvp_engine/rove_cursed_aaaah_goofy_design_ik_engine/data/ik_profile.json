@@ -1,0 +1,22 @@
+{
+  "mode": "pose_locked",
+  "damping": 0.05,
+  "rest_pose_gain": 0.3,
+  "max_iter": 60,
+  "orientation_weight": 5.0,
+  "joint_weight_strength": 0.0,
+  "max_dq_step": 0.05,
+  "max_pos_step": 0.05,
+  "max_total_dq_step": 0.1,
+  "orientation_secondary_gain": 0.5,
+  "max_lin_vel": 0.25,
+  "max_ang_vel": 1.0,
+  "rest_pose": {
+    "ent_joint_577d5a5f": 0.0,
+    "ent_joint_3f0529c9": 0.0,
+    "ent_joint_dd29be17": 0.0,
+    "ent_joint_6829915e": 0.0,
+    "ent_joint_3e4dd248": 3.14159,
+    "ent_joint_2c15d7d3": 3.14159
+  }
+}

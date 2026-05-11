@@ -1,0 +1,324 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>IK engine · debug</title>
+<style>
+  :root {
+    --bg: #0a0a0a;
+    --panel: #18181b;
+    --panel2: #27272a;
+    --border: #3f3f46;
+    --text: #e4e4e7;
+    --muted: #a1a1aa;
+    --dim: #71717a;
+    --teal: #2dd4bf;
+    --teal-dark: #14b8a6;
+    --violet: #a78bfa;
+    --amber: #fbbf24;
+    --red: #f87171;
+    --green: #34d399;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 16px;
+    background: var(--bg); color: var(--text);
+    font: 13px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  h1 { font-size: 14px; margin: 0 0 14px; letter-spacing: .02em; color: var(--text); }
+  h1 small { color: var(--muted); font-weight: normal; margin-left: 8px; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .panel {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 6px; padding: 10px 12px;
+  }
+  .panel h2 {
+    margin: 0 0 6px; font-size: 11px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: .06em; color: var(--muted);
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  .panel.full { grid-column: 1 / -1; }
+  .stale { color: var(--muted); }
+  .fresh { color: var(--green); }
+  .very-stale { color: var(--red); }
+  .joint-row {
+    display: grid;
+    grid-template-columns: 130px 1fr 80px 30px;
+    gap: 8px; align-items: center;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 11px; padding: 2px 0;
+  }
+  .joint-row .name { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .joint-row .val { text-align: right; color: var(--text); }
+  .joint-row .inv-pill {
+    font-size: 9px; padding: 1px 4px; border-radius: 2px;
+    background: rgba(251, 191, 36, .15); color: var(--amber);
+    text-align: center;
+  }
+  .joint-row .inv-pill.off { background: transparent; color: var(--dim); }
+  .bar {
+    position: relative; height: 8px; background: #0a0a0a;
+    border: 1px solid var(--border); border-radius: 3px; overflow: hidden;
+  }
+  .bar .center {
+    position: absolute; top: 0; bottom: 0; width: 1px;
+    background: var(--dim);
+  }
+  .bar .fill {
+    position: absolute; top: 0; bottom: 0;
+    background: var(--teal-dark);
+  }
+  .bar .fill.violet { background: var(--violet); }
+  .bar .fill.amber { background: var(--amber); }
+  .twist-row {
+    display: grid; grid-template-columns: 32px 1fr 70px;
+    gap: 8px; align-items: center;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 11px;
+    padding: 2px 0;
+  }
+  .twist-row .label { color: var(--muted); }
+  .twist-row .val { text-align: right; }
+  .stat-row {
+    display: flex; gap: 14px;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 11px;
+    color: var(--muted); margin-top: 4px;
+  }
+  .stat-row span.k { color: var(--dim); }
+  .stat-row span.v { color: var(--text); }
+  .pose-grid {
+    display: grid; grid-template-columns: auto auto; gap: 4px 16px;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 11px;
+  }
+  .pose-grid .k { color: var(--muted); }
+  .pose-grid .v { color: var(--text); }
+  .convergence {
+    display: inline-block; padding: 1px 6px; border-radius: 3px;
+    font-family: ui-monospace, monospace; font-size: 10px;
+  }
+  .convergence.ok  { background: rgba(20, 184, 166, .18); color: var(--green); }
+  .convergence.bad { background: rgba(239, 68, 68, .15);  color: var(--red); }
+  .mode-pill {
+    display: inline-block; padding: 1px 6px; border-radius: 3px;
+    font-family: ui-monospace, monospace; font-size: 10px;
+    background: rgba(167, 139, 250, .18); color: var(--violet);
+  }
+  .empty { color: var(--dim); font-style: italic; padding: 4px 0; }
+  footer { color: var(--dim); font-size: 11px; margin-top: 14px; text-align: center; }
+  footer code { color: var(--muted); }
+</style>
+</head>
+<body>
+  <h1>IK engine · debug <small id="chain-info">connecting…</small></h1>
+  <div class="grid">
+    <section class="panel full">
+      <h2>Joint state <span id="js-age" class="stale">—</span></h2>
+      <div id="joints"></div>
+      <div class="stat-row">
+        <div><span class="k">rx</span> <span class="v" id="js-rx">0</span></div>
+        <div><span class="k">last update</span> <span class="v" id="js-last">never</span></div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>Twist in <span id="twist-age" class="stale">—</span></h2>
+      <div id="twist"></div>
+      <div class="stat-row">
+        <div><span class="k">rx</span> <span class="v" id="twist-rx">0</span></div>
+        <div><span class="k">mode</span> <span class="v" id="twist-mode">—</span></div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>Joint command out <span id="cmd-age" class="stale">—</span></h2>
+      <div id="cmd"></div>
+      <div class="stat-row">
+        <div><span class="k">tx</span> <span class="v" id="cmd-tx">0</span></div>
+        <div><span class="k">mode</span> <span class="v" id="cmd-mode">—</span></div>
+        <div><span class="k">solve</span> <span id="cmd-conv">—</span></div>
+      </div>
+    </section>
+
+    <section class="panel full">
+      <h2>End-effector pose (FK at current q)</h2>
+      <div class="pose-grid" id="ee-pose"></div>
+    </section>
+  </div>
+  <footer>
+    polls <code>/state</code> at 20 Hz · headless engine if you don't open this page
+  </footer>
+
+<script>
+"use strict";
+
+const RAD_TO_DEG = 180 / Math.PI;
+
+function fmtAge(serverUs, now) {
+  if (!serverUs) return { text: "never", cls: "stale" };
+  const ageMs = Math.max(0, now - serverUs / 1000);
+  let cls = "fresh";
+  if (ageMs > 250) cls = "stale";
+  if (ageMs > 2000) cls = "very-stale";
+  let text;
+  if (ageMs < 1000) text = `${ageMs.toFixed(0)} ms ago`;
+  else if (ageMs < 60_000) text = `${(ageMs / 1000).toFixed(1)} s ago`;
+  else text = `${Math.floor(ageMs / 60_000)} min ago`;
+  return { text, cls };
+}
+
+function setAge(el, ts, now) {
+  const { text, cls } = fmtAge(ts, now);
+  el.textContent = text;
+  el.className = cls;
+}
+
+function clamp(v, lo, hi) {
+  return Math.max(lo, Math.min(hi, v));
+}
+
+function renderJointRow(j) {
+  const { lower, upper, q, name, inverted } = j;
+  const span = Math.max(upper - lower, 1e-6);
+  const frac = clamp((q - lower) / span, 0, 1);
+  const zeroFrac = clamp((0 - lower) / span, 0, 1);
+  // Bar grows from center toward q if q != 0, otherwise empty.
+  const left = Math.min(zeroFrac, frac);
+  const width = Math.abs(frac - zeroFrac);
+  const safeName = (name || "?").replace(/</g, "&lt;");
+  return `
+    <div class="joint-row">
+      <div class="name" title="${safeName}">${safeName}</div>
+      <div class="bar">
+        <div class="center" style="left:${(zeroFrac * 100).toFixed(2)}%"></div>
+        <div class="fill" style="left:${(left * 100).toFixed(2)}%; width:${(width * 100).toFixed(2)}%"></div>
+      </div>
+      <div class="val">${q.toFixed(3)} <span style="color:var(--dim)">rad</span></div>
+      <div class="inv-pill ${inverted ? "" : "off"}">${inverted ? "inv" : ""}</div>
+    </div>`;
+}
+
+function renderJoints(joints) {
+  if (!joints || joints.length === 0) {
+    document.getElementById("joints").innerHTML = `<div class="empty">no joints in chain</div>`;
+    return;
+  }
+  document.getElementById("joints").innerHTML = joints.map(renderJointRow).join("");
+}
+
+function renderTwist(t) {
+  const root = document.getElementById("twist");
+  if (!t) {
+    root.innerHTML = `<div class="empty">no twist received yet</div>`;
+    return;
+  }
+  const axes = [
+    ["x", t.position.x, "violet"],
+    ["y", t.position.y, "violet"],
+    ["z", t.position.z, "violet"],
+    ["R", t.orientation.roll, "amber"],
+    ["P", t.orientation.pitch, "amber"],
+    ["Y", t.orientation.yaw, "amber"],
+  ];
+  root.innerHTML = axes.map(([label, v, color]) => {
+    const clamped = clamp(v, -1, 1);
+    const frac = (clamped + 1) / 2; // 0..1
+    const center = 0.5;
+    const left = Math.min(center, frac);
+    const width = Math.abs(frac - center);
+    return `
+      <div class="twist-row">
+        <div class="label">${label}</div>
+        <div class="bar">
+          <div class="center" style="left:50%"></div>
+          <div class="fill ${color}" style="left:${(left * 100).toFixed(2)}%; width:${(width * 100).toFixed(2)}%"></div>
+        </div>
+        <div class="val">${v.toFixed(3)}</div>
+      </div>`;
+  }).join("");
+  document.getElementById("twist-mode").innerHTML =
+    `<span class="mode-pill">${t.mode === 1 ? "POSITION_IK" : "RESOLVED_RATE"}</span>`;
+}
+
+function renderCmd(c, joints) {
+  const root = document.getElementById("cmd");
+  if (!c) {
+    root.innerHTML = `<div class="empty">no command emitted yet</div>`;
+    document.getElementById("cmd-conv").innerHTML = "—";
+    document.getElementById("cmd-mode").textContent = "—";
+    return;
+  }
+  // Find a max magnitude for proportional bars (per command, not absolute).
+  const maxMag = Math.max(...c.joints.map(j => Math.abs(j.value)), 1e-6);
+  // We'll bar-render against this dynamic scale so small velocities aren't invisible.
+  root.innerHTML = c.joints.map((j) => {
+    const frac = clamp(j.value / maxMag, -1, 1);
+    const center = 0.5;
+    const norm = (frac + 1) / 2;
+    const left = Math.min(center, norm);
+    const width = Math.abs(norm - center);
+    const safeName = (j.name || "?").replace(/</g, "&lt;");
+    const unit = c.mode === 1 ? "" : " /s";
+    return `
+      <div class="joint-row">
+        <div class="name" title="${safeName}">${safeName}</div>
+        <div class="bar">
+          <div class="center" style="left:50%"></div>
+          <div class="fill" style="left:${(left * 100).toFixed(2)}%; width:${(width * 100).toFixed(2)}%"></div>
+        </div>
+        <div class="val">${j.value.toFixed(4)}<span style="color:var(--dim)">${unit}</span></div>
+        <div></div>
+      </div>`;
+  }).join("");
+  document.getElementById("cmd-mode").innerHTML =
+    `<span class="mode-pill">${c.mode === 1 ? "POSITION_IK" : "RESOLVED_RATE"}</span>`;
+  if (c.mode === 1) {
+    const cls = c.converged ? "ok" : "bad";
+    const txt = c.converged ? `✓ res ${c.residual.toFixed(4)}` : `✗ res ${c.residual.toFixed(4)}`;
+    document.getElementById("cmd-conv").innerHTML = `<span class="convergence ${cls}">${txt}</span>`;
+  } else {
+    document.getElementById("cmd-conv").innerHTML = `<span class="convergence ok">n/a (RR)</span>`;
+  }
+}
+
+function renderPose(pos, rpy) {
+  const root = document.getElementById("ee-pose");
+  const r = rpy.map(v => v * RAD_TO_DEG);
+  root.innerHTML = `
+    <div class="k">position</div>
+    <div class="v">x=${pos[0].toFixed(4)}  y=${pos[1].toFixed(4)}  z=${pos[2].toFixed(4)} <span style="color:var(--dim)">m</span></div>
+    <div class="k">orientation</div>
+    <div class="v">roll=${r[0].toFixed(2)}°  pitch=${r[1].toFixed(2)}°  yaw=${r[2].toFixed(2)}° <span style="color:var(--dim)">(ZYX)</span></div>
+  `;
+}
+
+async function tick() {
+  let s;
+  try {
+    const r = await fetch("/state", { cache: "no-store" });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    s = await r.json();
+  } catch (e) {
+    document.getElementById("chain-info").textContent = `disconnected · ${e.message}`;
+    return;
+  }
+  document.getElementById("chain-info").textContent =
+    `${s.chain.base} → ${s.chain.tip} · ${s.chain.movable_count} joints`;
+  const now = Date.now();
+  renderJoints(s.joints);
+  renderTwist(s.twist);
+  renderCmd(s.cmd, s.joints);
+  renderPose(s.ee_pos, s.ee_rpy);
+  document.getElementById("js-rx").textContent    = s.stats.js_rx.toLocaleString();
+  document.getElementById("twist-rx").textContent = s.stats.twist_rx.toLocaleString();
+  document.getElementById("cmd-tx").textContent   = s.stats.cmd_tx.toLocaleString();
+  document.getElementById("js-last").textContent  = fmtAge(s.ts.last_joint_state_us, now).text;
+  setAge(document.getElementById("js-age"),     s.ts.last_joint_state_us, now);
+  setAge(document.getElementById("twist-age"),  s.ts.last_twist_us, now);
+  setAge(document.getElementById("cmd-age"),    s.ts.last_cmd_us, now);
+}
+
+setInterval(tick, 50);  // 20 Hz
+tick();
+</script>
+</body>
+</html>

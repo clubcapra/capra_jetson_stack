@@ -1,0 +1,83 @@
+# rove_control_interface — runtime config.
+#
+# Glue between the Steam Deck teleop, the rove_mvp_engine IK solver, and the
+# Kinova arm exposed by rove_sensor_api.
+#
+#   teleop ──RoveControl──▶ this ──Twist+JointState──▶ rove_mvp_engine
+#                            ▲                              │
+#                            │   ◀────JointCommand──────────┘
+#                            │
+#                            ▼
+#               rove_sensor_api (kinova_arm UDP 5002 data / 5003 cmd)
+#                            │
+#                  ◀──RoveTelemetry── teleop
+
+# --- Teleop link (we listen for RoveControl, push back RoveTelemetry) ---
+[teleop]
+# Bind address for the inbound RoveControl UDP port.
+listen_host = "0.0.0.0"
+listen_port = 7000
+# Where to send RoveTelemetry. The host is rewritten to whichever address the
+# most recent RoveControl packet came from, so leave host empty unless you
+# want a static destination. Port is fixed (matches teleop's listener).
+telemetry_host = ""
+telemetry_port = 7001
+telemetry_rate_hz = 30.0
+
+# --- IK engine link ---
+[ik_engine]
+# rove_mvp_engine listens here. Same machine in the default deployment.
+host = "127.0.0.1"
+joints_port = 9501
+twist_port = 9502
+# Where the engine sends its JointCommand replies. We bind here.
+velocs_listen_host = "0.0.0.0"
+velocs_listen_port = 9503
+# Twist solve mode: "resolved_rate" (velocity output) or "position_ik".
+mode = "resolved_rate"
+
+# --- Kinova arm link (rove_sensor_api on the rover) ---
+[kinova]
+api_host = "192.168.2.2"
+data_port = 5002
+command_port = 5003
+# Subscribe interval the API will push at. Keep close to the engine cadence.
+subscribe_interval_ms = 33
+# Cadence we send velocity commands to the arm (matches kinova driver hint).
+command_rate_hz = 30.0
+
+# --- Joint mapping & calibration ------------------------------------------
+# Maps the IK chain's entity-id joint names to the Kinova arm's 1-indexed
+# joint slot. Order matters — entries here also define the IK→arm joint
+# vector position. Kinova joints not listed are held at zero velocity.
+#
+# Home-pose calibration (deg) defines what the kinova reports for each joint
+# when the arm is in its physical home. The IK engine's chain.json offsets
+# already absorb this so the engine sees q=0 at home; we keep it here too so
+# the wrapper can sanity-check sensor frames before forwarding them.
+[[joint_map]]
+ik_id = "ent_joint_3e4dd248"
+kinova_idx = 1
+home_deg = 275.02
+
+[[joint_map]]
+ik_id = "ent_joint_2c15d7d3"
+kinova_idx = 2
+home_deg = 174.97
+invert = true
+
+[[joint_map]]
+ik_id = "ent_joint_d6fa25aa"
+kinova_idx = 3
+home_deg = 78.70
+
+[[joint_map]]
+ik_id = "ent_joint_577d5a5f"
+kinova_idx = 4
+home_deg = 243.01
+
+[[joint_map]]
+ik_id = "ent_joint_3f0529c9"
+kinova_idx = 5
+home_deg = 84.26
+invert = true

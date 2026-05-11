@@ -1,0 +1,7 @@
+/home/capra/data/capra_rove_stack/capra_jetson_stack/rove_control_interface/target/debug/deps/colorchoice-101e9da4061b4f7a.d: /home/capra/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/colorchoice-1.0.5/src/lib.rs
+
+/home/capra/data/capra_rove_stack/capra_jetson_stack/rove_control_interface/target/debug/deps/libcolorchoice-101e9da4061b4f7a.rlib: /home/capra/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/colorchoice-1.0.5/src/lib.rs
+
+/home/capra/data/capra_rove_stack/capra_jetson_stack/rove_control_interface/target/debug/deps/libcolorchoice-101e9da4061b4f7a.rmeta: /home/capra/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/colorchoice-1.0.5/src/lib.rs
+
+/home/capra/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/colorchoice-1.0.5/src/lib.rs:
