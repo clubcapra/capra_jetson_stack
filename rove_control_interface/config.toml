@@ -52,9 +52,11 @@ command_rate_hz = 30.0
 # vector position. Kinova joints not listed are held at zero velocity.
 #
 # Home-pose calibration (deg) defines what the kinova reports for each joint
-# when the arm is in its physical home. The IK engine's chain.json offsets
-# already absorb this so the engine sees q=0 at home; we keep it here too so
-# the wrapper can sanity-check sensor frames before forwarding them.
+# when the arm is in its physical home. The wrapper sends `sign * (encoder -
+# home_deg) * π/180` to the engine, and IKEngineExporter bakes the project's
+# home pose into the exported chain.json + URDF — so the engine and its
+# debug GUI both treat q=0 as the home pose. End-to-end: arm at encoder home
+# → wrapper sends q=0 → engine + URDF render at home.
 [[joint_map]]
 ik_id = "ent_joint_3e4dd248"
 kinova_idx = 1
