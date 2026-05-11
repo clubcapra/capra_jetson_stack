@@ -75,7 +75,25 @@ class State:
 def _make_state(chain_path: Path, profile_path: Path) -> State:
     chain = ik_math.load_chain(chain_path)
     profile = ik_math.load_profile(profile_path)
+    # Seed q with the project's home pose so the engine's view of the
+    # arm starts where the real arm actually starts (home), not at q=0
+    # (the URDF's stretched-out neutral). This matters before any
+    # JointState arrives — first IK solve runs against the right
+    # starting state, and the debug UI shows the robot at home
+    # rather than flat-out. The home pose is exported into
+    # ik_profile.json's `rest_pose` field by IKEngineExporter; edit
+    # that file to change the default without re-exporting.
     q0 = {j.id: 0.0 for j in chain.movable}
+    seeded = 0
+    for jid, v in (profile.rest_pose or {}).items():
+        if jid in q0:
+            q0[jid] = float(v)
+            seeded += 1
+    if seeded > 0:
+        _log.info(
+            "initial q seeded from home pose: %d / %d joints",
+            seeded, len(q0),
+        )
     return State(chain=chain, profile=profile, q=q0)
 
 
@@ -224,7 +242,7 @@ async def serve(
     velocs_host: str = "127.0.0.1",
     velocs_port: int = 9503,
     gui: bool = False,
-    gui_host: str = "127.0.0.1",
+    gui_host: str = "0.0.0.0",
     gui_port: int = 9504,
 ) -> None:
     state = _make_state(chain_path, profile_path)
@@ -274,7 +292,11 @@ def main() -> None:
         "--gui", action="store_true",
         help="enable the debug HTTP UI (off by default; engine is headless)",
     )
-    ap.add_argument("--gui-host", default="127.0.0.1", help="bind address for the debug GUI")
+    ap.add_argument(
+        "--gui-host", default="0.0.0.0",
+        help="bind address for the debug GUI (default 0.0.0.0 so a "
+             "laptop on the LAN can reach the engine running on the robot)",
+    )
     ap.add_argument("--gui-port", type=int, default=9504, help="port for the debug GUI")
     ap.add_argument("--log-level", default="INFO")
     args = ap.parse_args()

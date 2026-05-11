@@ -47,23 +47,39 @@ CLI flags (full list: `python run.py -h`):
 ## Debug UI
 
 Add `--gui` to the command line to spin up a small HTTP server alongside
-the UDP engine. Then open `http://127.0.0.1:9504` in any browser:
+the UDP engine:
 
 ```
 python run.py --gui
 ```
 
-The page polls the engine at 20 Hz and shows:
+The GUI binds on **`0.0.0.0:9504`** by default — so if you're running
+the engine on the robot's onboard computer, you can open it from your
+laptop at `http://<robot-ip>:9504`. The engine prints the reachable
+URLs on startup; copy one of those. To restrict to localhost only,
+pass `--gui-host 127.0.0.1`.
 
-* per-joint state (current `q` within each joint's URDF limits, with
-  inversion flag) and the last-rx age
-* latest Twist received (per-axis bars in [-1, 1]) and the IK mode
-  flag of that packet
-* latest JointCommand emitted (per-joint `q_dot` for RESOLVED_RATE or
-  `q` for POSITION_IK), plus solver convergence + residual for
-  POSITION_IK
-* end-effector pose (FK at the current `q`) — position in metres,
-  orientation as ZYX Euler in degrees
+What you get:
+
+* **3D viewport (left)** — the URDF loaded live from `data/robot.urdf`,
+  rendered with Three.js. Two overlaid copies:
+    * **teal**, solid: the real-arm pose, driven by the most recent
+      `JointState` we received.
+    * **orange**, translucent wireframe: where the IK is pushing —
+      either `cmd.joints` directly (POSITION_IK) or
+      `q + q_dot · 0.3 s` projected forward (RESOLVED_RATE).
+  Toggle either layer with the header checkboxes. The viewport speaks
+  Three.js orbit controls (drag, right-drag pan, scroll zoom).
+* **Side panels (right)** poll `/state` at 20 Hz and show:
+    * per-joint `q` within URDF limits, plus the inversion flag,
+    * the latest `Twist` (per-axis bars in [-1, 1]) and its IK mode,
+    * the latest `JointCommand` and the solver convergence/residual,
+    * the FK end-effector pose (m + ZYX degrees).
+
+The bundle is **fully offline-capable** — Three.js, OrbitControls,
+the URDF loader, and its mesh loaders are all vendored under
+`engine/static/lib/` and served by the engine itself. No CDN, no
+unpkg, no internet required.
 
 If you don't pass `--gui`, no HTTP server runs and the engine is
 byte-identical to the headless baseline (one less moving part if
@@ -140,6 +156,17 @@ When `mode = POSITION_IK`, each `joints[i].value` is a joint
 *position* (rad, m). `converged=false` means the solver hit
 `max_iter` without reaching tolerance — usually because the target
 left the workspace; the residual tells you by how much.
+
+## Initial pose
+
+On startup the engine seeds its internal `q` from the project's home
+pose (whatever you set with *File ▸ Set Home* in the editor), so the
+first IK solve and the debug UI both reflect where the real arm
+*actually* starts — not the URDF's stretched-out q=0 neutral.
+
+The home pose lives in `data/ik_profile.json` under the `rest_pose`
+key. Edit that file to change the engine's default starting pose
+without re-exporting; restart `run.py` to pick it up.
 
 ## Tuning
 

@@ -1,0 +1,659 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>IK engine · debug</title>
+<style>
+  :root {
+    --bg: #0a0a0a;
+    --panel: #18181b;
+    --panel2: #27272a;
+    --border: #3f3f46;
+    --text: #e4e4e7;
+    --muted: #a1a1aa;
+    --dim: #71717a;
+    --teal: #2dd4bf;
+    --teal-dark: #14b8a6;
+    --violet: #a78bfa;
+    --amber: #fbbf24;
+    --red: #f87171;
+    --green: #34d399;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font: 13px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+    display: flex; flex-direction: column;
+  }
+  header {
+    padding: 10px 16px; border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 16px; flex: 0 0 auto;
+  }
+  header h1 { font-size: 14px; margin: 0; letter-spacing: .02em; }
+  header h1 small { color: var(--muted); font-weight: normal; margin-left: 8px; }
+  header .controls { display: flex; gap: 8px; margin-left: auto; }
+  header label {
+    font-size: 11px; color: var(--muted); display: flex;
+    align-items: center; gap: 4px; cursor: pointer;
+    padding: 3px 8px; border: 1px solid var(--border); border-radius: 4px;
+    background: var(--panel);
+  }
+  header label input { margin: 0; }
+  main {
+    display: grid; grid-template-columns: 1fr 420px;
+    grid-template-rows: 1fr;
+    flex: 1 1 auto; min-height: 0;
+  }
+  #viewport {
+    position: relative;
+    background: #07070a;
+    border-right: 1px solid var(--border);
+    min-height: 0; min-width: 0; overflow: hidden;
+  }
+  #viewport canvas { display: block; }
+  #viewport .overlay {
+    position: absolute; top: 8px; left: 8px;
+    background: rgba(10, 10, 10, .8); border: 1px solid var(--border);
+    border-radius: 4px; padding: 6px 10px;
+    font-size: 11px; color: var(--muted);
+    font-family: ui-monospace, monospace; pointer-events: none;
+  }
+  #viewport .overlay .fresh { color: var(--green); }
+  #viewport .overlay .stale { color: var(--amber); }
+  #viewport .overlay .dead  { color: var(--red); }
+  #viewport .overlay .key { color: var(--dim); }
+  #viewport .legend {
+    position: absolute; bottom: 8px; left: 8px;
+    background: rgba(10, 10, 10, .8); border: 1px solid var(--border);
+    border-radius: 4px; padding: 6px 10px;
+    font-size: 11px; font-family: ui-monospace, monospace;
+    pointer-events: none;
+  }
+  #viewport .legend .sw {
+    display: inline-block; width: 10px; height: 10px; border-radius: 2px;
+    vertical-align: middle; margin-right: 4px;
+  }
+  aside {
+    overflow-y: auto; padding: 12px; background: var(--bg);
+    display: flex; flex-direction: column; gap: 10px; min-height: 0;
+  }
+  .panel {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 6px; padding: 10px 12px;
+  }
+  .panel h2 {
+    margin: 0 0 6px; font-size: 11px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: .06em; color: var(--muted);
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  .stale { color: var(--muted); }
+  .fresh { color: var(--green); }
+  .very-stale { color: var(--red); }
+  .joint-row {
+    display: grid;
+    grid-template-columns: 110px 1fr 80px 30px;
+    gap: 8px; align-items: center;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 11px; padding: 1px 0;
+  }
+  .joint-row .name { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .joint-row .val { text-align: right; color: var(--text); }
+  .joint-row .inv-pill {
+    font-size: 9px; padding: 1px 4px; border-radius: 2px;
+    background: rgba(251, 191, 36, .15); color: var(--amber);
+    text-align: center;
+  }
+  .joint-row .inv-pill.off { background: transparent; color: var(--dim); }
+  .bar {
+    position: relative; height: 6px; background: #0a0a0a;
+    border: 1px solid var(--border); border-radius: 3px; overflow: hidden;
+  }
+  .bar .center { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--dim); }
+  .bar .fill { position: absolute; top: 0; bottom: 0; background: var(--teal-dark); }
+  .bar .fill.violet { background: var(--violet); }
+  .bar .fill.amber { background: var(--amber); }
+  .twist-row {
+    display: grid; grid-template-columns: 32px 1fr 70px;
+    gap: 8px; align-items: center;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 11px;
+    padding: 1px 0;
+  }
+  .twist-row .label { color: var(--muted); }
+  .twist-row .val { text-align: right; }
+  .stat-row {
+    display: flex; gap: 14px; flex-wrap: wrap;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 11px;
+    color: var(--muted); margin-top: 4px;
+  }
+  .stat-row span.k { color: var(--dim); }
+  .stat-row span.v { color: var(--text); }
+  .pose-grid {
+    display: grid; grid-template-columns: auto auto; gap: 3px 12px;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 11px;
+  }
+  .pose-grid .k { color: var(--muted); }
+  .pose-grid .v { color: var(--text); }
+  .convergence {
+    display: inline-block; padding: 1px 6px; border-radius: 3px;
+    font-family: ui-monospace, monospace; font-size: 10px;
+  }
+  .convergence.ok  { background: rgba(20, 184, 166, .18); color: var(--green); }
+  .convergence.bad { background: rgba(239, 68, 68, .15);  color: var(--red); }
+  .mode-pill {
+    display: inline-block; padding: 1px 6px; border-radius: 3px;
+    font-family: ui-monospace, monospace; font-size: 10px;
+    background: rgba(167, 139, 250, .18); color: var(--violet);
+  }
+  .empty { color: var(--dim); font-style: italic; padding: 4px 0; }
+  #load-error {
+    position: absolute; inset: 0; display: none;
+    align-items: center; justify-content: center; flex-direction: column;
+    background: rgba(10, 10, 10, .9); padding: 20px;
+    font-family: ui-monospace, monospace; font-size: 12px;
+    text-align: center;
+  }
+  #load-error.show { display: flex; }
+  #load-error h3 { color: var(--red); margin: 0 0 10px; }
+  #load-error code { color: var(--amber); }
+</style>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "/lib/three.module.js",
+    "three/examples/jsm/": "/lib/three/examples/jsm/",
+    "three/addons/": "/lib/three/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+  <header>
+    <h1>IK engine · debug <small id="chain-info">connecting…</small></h1>
+    <div class="controls">
+      <label><input type="checkbox" id="toggle-actual"  checked> actual (real arm)</label>
+      <label><input type="checkbox" id="toggle-target"  checked> IK target (ghost)</label>
+      <label><input type="checkbox" id="toggle-grid"    checked> grid</label>
+    </div>
+  </header>
+  <main>
+    <div id="viewport">
+      <div class="overlay" id="viewport-status">URDF: loading…</div>
+      <div class="legend">
+        <div><span class="sw" style="background:#2dd4bf"></span>actual (state.q)</div>
+        <div><span class="sw" style="background:#fb923c;opacity:.6"></span>IK target (last cmd)</div>
+      </div>
+      <div id="load-error">
+        <h3>URDF failed to load</h3>
+        <div id="load-error-msg"></div>
+        <div style="margin-top: 10px; color: var(--muted);">
+          Check the engine console; meshes are served under <code>/data/meshes/</code>.
+        </div>
+      </div>
+    </div>
+    <aside>
+      <section class="panel">
+        <h2>Joint state <span id="js-age" class="stale">—</span></h2>
+        <div id="joints"></div>
+        <div class="stat-row">
+          <div><span class="k">rx</span> <span class="v" id="js-rx">0</span></div>
+          <div><span class="k">last</span> <span class="v" id="js-last">never</span></div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>Twist in <span id="twist-age" class="stale">—</span></h2>
+        <div id="twist"></div>
+        <div class="stat-row">
+          <div><span class="k">rx</span> <span class="v" id="twist-rx">0</span></div>
+          <div><span class="k">mode</span> <span class="v" id="twist-mode">—</span></div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>Joint command out <span id="cmd-age" class="stale">—</span></h2>
+        <div id="cmd"></div>
+        <div class="stat-row">
+          <div><span class="k">tx</span> <span class="v" id="cmd-tx">0</span></div>
+          <div><span class="k">mode</span> <span class="v" id="cmd-mode">—</span></div>
+          <div><span class="k">solve</span> <span id="cmd-conv">—</span></div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>End-effector pose (FK at q)</h2>
+        <div class="pose-grid" id="ee-pose"></div>
+      </section>
+    </aside>
+  </main>
+
+<script type="module">
+"use strict";
+
+import * as THREE from "three";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { STLLoader } from "three/addons/loaders/STLLoader.js";
+import { ColladaLoader } from "three/addons/loaders/ColladaLoader.js";
+import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+import URDFLoader from "/lib/urdf-loader/URDFLoader.js";
+
+// URDFLoader's built-in defaultMeshLoader only handles .stl and .dae.
+// Robots exported from ForgeBOT typically use .glb (binary glTF), so
+// we install a custom mesh loader that dispatches by extension across
+// glb/gltf, stl, dae. If a format we don't know about shows up, log
+// it and skip — the URDF tree still renders, just without that link.
+function customMeshLoader(path, manager, onLoad /* , onError */) {
+  const ext = path.split(".").pop().toLowerCase();
+  const fail = (err) => {
+    console.warn(`URDFLoader: mesh load failed for ${path}:`, err);
+    onLoad(new THREE.Object3D());  // empty placeholder so chain keeps building
+  };
+  if (ext === "glb" || ext === "gltf") {
+    new GLTFLoader(manager).load(path, (gltf) => onLoad(gltf.scene), undefined, fail);
+  } else if (ext === "stl") {
+    new STLLoader(manager).load(
+      path,
+      (geom) => onLoad(new THREE.Mesh(geom, new THREE.MeshPhongMaterial())),
+      undefined,
+      fail,
+    );
+  } else if (ext === "dae") {
+    new ColladaLoader(manager).load(path, (dae) => onLoad(dae.scene), undefined, fail);
+  } else {
+    fail(new Error(`unsupported mesh format: ${ext}`));
+  }
+}
+
+// ---- Three.js scene setup ----------------------------------------
+
+const RAD_TO_DEG = 180 / Math.PI;
+
+const viewportEl = document.getElementById("viewport");
+const statusEl = document.getElementById("viewport-status");
+const loadErrEl = document.getElementById("load-error");
+const loadErrMsgEl = document.getElementById("load-error-msg");
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x07070a);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.setPixelRatio(window.devicePixelRatio);
+viewportEl.appendChild(renderer.domElement);
+
+const camera = new THREE.PerspectiveCamera(45, 1, 0.01, 100);
+camera.position.set(1.2, 1.0, 1.4);
+
+scene.add(new THREE.HemisphereLight(0xdbe7ff, 0x3f3a2e, 0.6));
+scene.add(new THREE.AmbientLight(0xffffff, 0.45));
+const dirLight = new THREE.DirectionalLight(0xffffff, 0.9);
+dirLight.position.set(3, 4, 2);
+scene.add(dirLight);
+
+const grid = new THREE.GridHelper(4, 20, 0x52525b, 0x3f3f46);
+// URDFs use Z-up; rotate grid so it sits on the XY plane.
+grid.rotation.x = Math.PI / 2;
+scene.add(grid);
+const axes = new THREE.AxesHelper(0.3);
+scene.add(axes);
+
+camera.up.set(0, 0, 1);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.set(0, 0, 0.2);
+controls.enableDamping = true;
+controls.dampingFactor = 0.12;
+
+function resize() {
+  const w = viewportEl.clientWidth;
+  const h = viewportEl.clientHeight;
+  if (w === 0 || h === 0) return;
+  renderer.setSize(w, h, false);
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+}
+new ResizeObserver(resize).observe(viewportEl);
+resize();
+
+// ---- URDF loading ------------------------------------------------
+
+// We load TWO copies of the URDF — one solid for "actual" (state.q),
+// one wireframe-translucent for "IK target" (last commanded pose).
+// Each gets its own URDFLoader instance so they don't share mutable
+// per-joint state.
+
+let robotActual = null;
+let robotTarget = null;
+let urdfReady = false;
+
+const loaderActual = new URDFLoader();
+const loaderTarget = new URDFLoader();
+loaderActual.parseVisual = true;
+loaderTarget.parseVisual = true;
+
+// Both loaders need the meshes served from /data/meshes/. The URDF
+// references them as relative paths (urdf_exporter writes "meshes/...").
+loaderActual.workingPath = "/data/";
+loaderTarget.workingPath = "/data/";
+
+// Plug in our extension-aware mesh loader so .glb / .gltf work too.
+loaderActual.loadMeshCb = customMeshLoader;
+loaderTarget.loadMeshCb = customMeshLoader;
+
+function tintMaterials(obj3d, color, opacity, wireframe) {
+  obj3d.traverse((node) => {
+    if (node.isMesh) {
+      const mat = new THREE.MeshStandardMaterial({
+        color,
+        roughness: 0.65,
+        metalness: 0.05,
+        transparent: opacity < 1,
+        opacity,
+        wireframe: !!wireframe,
+        depthWrite: opacity >= 0.99,
+      });
+      node.material = mat;
+      node.castShadow = false;
+      node.receiveShadow = false;
+    }
+  });
+}
+
+async function loadURDFs() {
+  statusEl.textContent = "URDF: loading…";
+  try {
+    robotActual = await new Promise((resolve, reject) => {
+      loaderActual.load("/data/robot.urdf", (r) => resolve(r), undefined, (e) => reject(e));
+    });
+    tintMaterials(robotActual, 0x2dd4bf, 1.0, false);
+    scene.add(robotActual);
+
+    robotTarget = await new Promise((resolve, reject) => {
+      loaderTarget.load("/data/robot.urdf", (r) => resolve(r), undefined, (e) => reject(e));
+    });
+    tintMaterials(robotTarget, 0xfb923c, 0.35, true);
+    scene.add(robotTarget);
+
+    urdfReady = true;
+    statusEl.textContent =
+      `URDF: ${Object.keys(robotActual.joints || {}).length} joints`;
+    // Frame the robot once it's loaded.
+    frameRobot(robotActual);
+  } catch (err) {
+    console.error("URDF load failed", err);
+    loadErrEl.classList.add("show");
+    loadErrMsgEl.textContent = String(err?.message ?? err);
+  }
+}
+
+function frameRobot(robot) {
+  if (!robot) return;
+  const box = new THREE.Box3().setFromObject(robot);
+  if (!isFinite(box.min.x) || box.isEmpty()) return;
+  const size = box.getSize(new THREE.Vector3()).length();
+  const center = box.getCenter(new THREE.Vector3());
+  controls.target.copy(center);
+  camera.position.copy(center).add(new THREE.Vector3(size * 0.8, size * 0.8, size * 0.6));
+  camera.near = Math.max(0.001, size / 100);
+  camera.far = size * 10;
+  camera.updateProjectionMatrix();
+}
+
+loadURDFs();
+
+// ---- state polling + joint application ---------------------------
+
+// chain.json carries joint *display names* (the URDF's joint names),
+// but JointState wire packets are keyed by entity ID. The /state JSON
+// gives us both — we build the map after the first /state response
+// (we can't fetch chain.json directly; the server doesn't expose it
+// under /state, but `s.joints` mirrors chain.json one-to-one).
+let idToName = {};  // entity_id → URDF joint name
+
+function applyJoints(robot, valuesByJointName) {
+  if (!robot || !robot.joints) return;
+  for (const [name, v] of Object.entries(valuesByJointName)) {
+    const joint = robot.joints[name];
+    if (joint) joint.setJointValue(v);
+  }
+}
+
+// Integrate q_dot to a "target" pose for RESOLVED_RATE mode. We
+// project ahead by RR_PROJECT_S seconds so the ghost shows where the
+// IK is *heading*, not just where it nudged this tick.
+const RR_PROJECT_S = 0.30;
+
+function targetPoseFromCmd(cmd, state) {
+  if (!cmd) return null;
+  const targetByName = {};
+  if (cmd.mode === 1) {
+    // POSITION_IK: cmd.joints carries target positions directly.
+    for (const j of cmd.joints) {
+      const name = idToName[j.name];
+      if (name) targetByName[name] = j.value;
+    }
+    return targetByName;
+  }
+  // RESOLVED_RATE: q_target = q_current + q_dot · dt
+  const currentByName = {};
+  for (const j of state.joints) {
+    currentByName[j.name] = j.q;
+  }
+  for (const j of cmd.joints) {
+    const name = idToName[j.name];
+    if (!name) continue;
+    targetByName[name] = (currentByName[name] ?? 0) + j.value * RR_PROJECT_S;
+  }
+  return targetByName;
+}
+
+// ---- HTML data panel (joints/twist/cmd/pose) rendering ----------
+
+function fmtAge(serverUs, now) {
+  if (!serverUs) return { text: "never", cls: "stale" };
+  const ageMs = Math.max(0, now - serverUs / 1000);
+  let cls = "fresh";
+  if (ageMs > 250) cls = "stale";
+  if (ageMs > 2000) cls = "very-stale";
+  let text;
+  if (ageMs < 1000) text = `${ageMs.toFixed(0)} ms ago`;
+  else if (ageMs < 60_000) text = `${(ageMs / 1000).toFixed(1)} s ago`;
+  else text = `${Math.floor(ageMs / 60_000)} min ago`;
+  return { text, cls };
+}
+
+function setAge(el, ts, now) {
+  const { text, cls } = fmtAge(ts, now);
+  el.textContent = text;
+  el.className = cls;
+}
+
+function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
+function renderJointRow(j) {
+  const { lower, upper, q, name, inverted } = j;
+  const span = Math.max(upper - lower, 1e-6);
+  const frac = clamp((q - lower) / span, 0, 1);
+  const zeroFrac = clamp((0 - lower) / span, 0, 1);
+  const left = Math.min(zeroFrac, frac);
+  const width = Math.abs(frac - zeroFrac);
+  const safeName = (name || "?").replace(/</g, "&lt;");
+  return `
+    <div class="joint-row">
+      <div class="name" title="${safeName}">${safeName}</div>
+      <div class="bar">
+        <div class="center" style="left:${(zeroFrac * 100).toFixed(2)}%"></div>
+        <div class="fill" style="left:${(left * 100).toFixed(2)}%; width:${(width * 100).toFixed(2)}%"></div>
+      </div>
+      <div class="val">${q.toFixed(3)} <span style="color:var(--dim)">rad</span></div>
+      <div class="inv-pill ${inverted ? "" : "off"}">${inverted ? "inv" : ""}</div>
+    </div>`;
+}
+
+function renderJoints(joints) {
+  if (!joints || joints.length === 0) {
+    document.getElementById("joints").innerHTML = `<div class="empty">no joints in chain</div>`;
+    return;
+  }
+  document.getElementById("joints").innerHTML = joints.map(renderJointRow).join("");
+}
+
+function renderTwist(t) {
+  const root = document.getElementById("twist");
+  if (!t) {
+    root.innerHTML = `<div class="empty">no twist received yet</div>`;
+    return;
+  }
+  const axes = [
+    ["x", t.position.x, "violet"],
+    ["y", t.position.y, "violet"],
+    ["z", t.position.z, "violet"],
+    ["R", t.orientation.roll, "amber"],
+    ["P", t.orientation.pitch, "amber"],
+    ["Y", t.orientation.yaw, "amber"],
+  ];
+  root.innerHTML = axes.map(([label, v, color]) => {
+    const clamped = clamp(v, -1, 1);
+    const frac = (clamped + 1) / 2;
+    const center = 0.5;
+    const left = Math.min(center, frac);
+    const width = Math.abs(frac - center);
+    return `
+      <div class="twist-row">
+        <div class="label">${label}</div>
+        <div class="bar">
+          <div class="center" style="left:50%"></div>
+          <div class="fill ${color}" style="left:${(left * 100).toFixed(2)}%; width:${(width * 100).toFixed(2)}%"></div>
+        </div>
+        <div class="val">${v.toFixed(3)}</div>
+      </div>`;
+  }).join("");
+  document.getElementById("twist-mode").innerHTML =
+    `<span class="mode-pill">${t.mode === 1 ? "POSITION_IK" : "RESOLVED_RATE"}</span>`;
+}
+
+function renderCmd(c, joints) {
+  const root = document.getElementById("cmd");
+  if (!c) {
+    root.innerHTML = `<div class="empty">no command emitted yet</div>`;
+    document.getElementById("cmd-conv").innerHTML = "—";
+    document.getElementById("cmd-mode").textContent = "—";
+    return;
+  }
+  const maxMag = Math.max(...c.joints.map(j => Math.abs(j.value)), 1e-6);
+  root.innerHTML = c.joints.map((j) => {
+    const frac = clamp(j.value / maxMag, -1, 1);
+    const center = 0.5;
+    const norm = (frac + 1) / 2;
+    const left = Math.min(center, norm);
+    const width = Math.abs(norm - center);
+    const displayName = idToName[j.name] || j.name;
+    const safeName = displayName.replace(/</g, "&lt;");
+    const unit = c.mode === 1 ? "" : " /s";
+    return `
+      <div class="joint-row">
+        <div class="name" title="${safeName}">${safeName}</div>
+        <div class="bar">
+          <div class="center" style="left:50%"></div>
+          <div class="fill" style="left:${(left * 100).toFixed(2)}%; width:${(width * 100).toFixed(2)}%"></div>
+        </div>
+        <div class="val">${j.value.toFixed(4)}<span style="color:var(--dim)">${unit}</span></div>
+        <div></div>
+      </div>`;
+  }).join("");
+  document.getElementById("cmd-mode").innerHTML =
+    `<span class="mode-pill">${c.mode === 1 ? "POSITION_IK" : "RESOLVED_RATE"}</span>`;
+  if (c.mode === 1) {
+    const cls = c.converged ? "ok" : "bad";
+    const txt = c.converged ? `✓ res ${c.residual.toFixed(4)}` : `✗ res ${c.residual.toFixed(4)}`;
+    document.getElementById("cmd-conv").innerHTML = `<span class="convergence ${cls}">${txt}</span>`;
+  } else {
+    document.getElementById("cmd-conv").innerHTML = `<span class="convergence ok">n/a (RR)</span>`;
+  }
+}
+
+function renderPose(pos, rpy) {
+  const root = document.getElementById("ee-pose");
+  const r = rpy.map(v => v * RAD_TO_DEG);
+  root.innerHTML = `
+    <div class="k">position</div>
+    <div class="v">x=${pos[0].toFixed(4)}  y=${pos[1].toFixed(4)}  z=${pos[2].toFixed(4)} <span style="color:var(--dim)">m</span></div>
+    <div class="k">orientation</div>
+    <div class="v">roll=${r[0].toFixed(2)}°  pitch=${r[1].toFixed(2)}°  yaw=${r[2].toFixed(2)}° <span style="color:var(--dim)">(ZYX)</span></div>
+  `;
+}
+
+// ---- toggles for the viewport overlay layers ---------------------
+
+document.getElementById("toggle-actual").addEventListener("change", (e) => {
+  if (robotActual) robotActual.visible = e.target.checked;
+});
+document.getElementById("toggle-target").addEventListener("change", (e) => {
+  if (robotTarget) robotTarget.visible = e.target.checked;
+});
+document.getElementById("toggle-grid").addEventListener("change", (e) => {
+  grid.visible = e.target.checked;
+});
+
+// ---- main loop ---------------------------------------------------
+
+async function poll() {
+  let s;
+  try {
+    const r = await fetch("/state", { cache: "no-store" });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    s = await r.json();
+  } catch (e) {
+    document.getElementById("chain-info").textContent = `disconnected · ${e.message}`;
+    return;
+  }
+  document.getElementById("chain-info").textContent =
+    `${s.chain.base} → ${s.chain.tip} · ${s.chain.movable_count} joints`;
+
+  // Build id → display-name map on first state, refresh if scene changed.
+  if (Object.keys(idToName).length !== s.joints.length) {
+    idToName = {};
+    for (const j of s.joints) idToName[j.id] = j.name;
+  }
+
+  // Apply joint values to the URDF instances.
+  if (urdfReady) {
+    const actualByName = {};
+    for (const j of s.joints) actualByName[j.name] = j.q;
+    applyJoints(robotActual, actualByName);
+
+    const targetByName = targetPoseFromCmd(s.cmd, s);
+    if (targetByName) applyJoints(robotTarget, targetByName);
+    else applyJoints(robotTarget, actualByName); // no cmd yet → align with actual
+  }
+
+  // HTML data panels.
+  const now = Date.now();
+  renderJoints(s.joints);
+  renderTwist(s.twist);
+  renderCmd(s.cmd, s.joints);
+  renderPose(s.ee_pos, s.ee_rpy);
+  document.getElementById("js-rx").textContent    = s.stats.js_rx.toLocaleString();
+  document.getElementById("twist-rx").textContent = s.stats.twist_rx.toLocaleString();
+  document.getElementById("cmd-tx").textContent   = s.stats.cmd_tx.toLocaleString();
+  document.getElementById("js-last").textContent  = fmtAge(s.ts.last_joint_state_us, now).text;
+  setAge(document.getElementById("js-age"),    s.ts.last_joint_state_us, now);
+  setAge(document.getElementById("twist-age"), s.ts.last_twist_us, now);
+  setAge(document.getElementById("cmd-age"),   s.ts.last_cmd_us, now);
+}
+
+// Three.js render loop — independent of polling rate so the viewport
+// stays smooth even when /state hiccups.
+function animate() {
+  requestAnimationFrame(animate);
+  controls.update();
+  renderer.render(scene, camera);
+}
+animate();
+
+setInterval(poll, 50);  // 20 Hz state polling
+poll();
+</script>
+</body>
+</html>

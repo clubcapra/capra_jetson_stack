@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import socket
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -31,8 +32,42 @@ import numpy as np
 
 from . import ik as ik_math
 
+
+def _local_ipv4s() -> list[str]:
+    """Best-effort list of this machine's non-loopback IPv4 addresses.
+
+    Used to print useful URLs in the startup log when --gui-host is
+    0.0.0.0. Quietly returns [] if the OS can't tell us — we'll fall
+    back to whatever the user passed.
+    """
+    ips: set[str] = set()
+    # The "connect to a public IP" trick picks the routing-interface
+    # address without sending a packet.
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(("8.8.8.8", 1))
+            ips.add(s.getsockname()[0])
+        finally:
+            s.close()
+    except OSError:
+        pass
+    # Hostname resolution catches additional interfaces.
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None):
+            ip = info[4][0]
+            if ":" not in ip and not ip.startswith("127."):
+                ips.add(ip)
+    except (socket.gaierror, OSError):
+        pass
+    return sorted(ips)
+
 _log = logging.getLogger("ik_engine.gui")
 _STATIC_DIR = Path(__file__).resolve().parent / "static"
+# The exported bundle layout is:  <root>/engine/{server,debug_ui,…}.py
+# and  <root>/data/{robot.urdf, meshes/, …}. Both dirs are reachable
+# from this module via parent.parent.
+_DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 
 # Map static file extensions to Content-Type. Limited to what the
 # debug UI actually needs — no general-purpose static server here.
@@ -40,8 +75,20 @@ _CONTENT_TYPES = {
     ".html": "text/html; charset=utf-8",
     ".css": "text/css; charset=utf-8",
     ".js": "application/javascript; charset=utf-8",
+    ".json": "application/json; charset=utf-8",
     ".svg": "image/svg+xml",
     ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".urdf": "application/xml; charset=utf-8",
+    ".xml": "application/xml; charset=utf-8",
+    ".stl": "application/octet-stream",
+    ".obj": "text/plain; charset=utf-8",
+    ".mtl": "text/plain; charset=utf-8",
+    ".dae": "application/xml; charset=utf-8",
+    ".gltf": "model/gltf+json",
+    ".glb": "model/gltf-binary",
+    ".ply": "application/octet-stream",
 }
 
 
@@ -156,16 +203,21 @@ def _make_handler(state: Any):
             if path == "/state":
                 self._write_json(_snapshot(state))
                 return
+            if path.startswith("/data/"):
+                # Robot URDF + meshes + textures (everything the URDF
+                # loader needs in the browser). Path resolves under
+                # <bundle_root>/data/.
+                self._serve_file(path[len("/data/"):], _DATA_DIR)
+                return
             if path == "/" or path == "":
                 path = "/index.html"
-            self._serve_static(path)
+            self._serve_file(path.lstrip("/"), _STATIC_DIR)
 
-        def _serve_static(self, path: str) -> None:
-            # Strip leading "/", clamp to STATIC_DIR (prevent traversal).
-            rel = path.lstrip("/")
-            full = (_STATIC_DIR / rel).resolve()
+        def _serve_file(self, rel: str, root: Path) -> None:
+            # Clamp to `root` (prevent traversal via "../" etc.).
+            full = (root / rel).resolve()
             try:
-                full.relative_to(_STATIC_DIR.resolve())
+                full.relative_to(root.resolve())
             except ValueError:
                 self.send_error(403)
                 return
@@ -178,6 +230,9 @@ def _make_handler(state: Any):
             self.send_header("Content-Type", ct)
             self.send_header("Content-Length", str(len(data)))
             self.send_header("Cache-Control", "no-store")
+            # Permissive CORS so the URDF + mesh loaders don't choke when
+            # the page is served from a different origin during dev.
+            self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
             self.wfile.write(data)
 
@@ -194,7 +249,7 @@ def _make_handler(state: Any):
     return _Handler
 
 
-def start(state: Any, host: str = "127.0.0.1", port: int = 9504) -> ThreadingHTTPServer:
+def start(state: Any, host: str = "0.0.0.0", port: int = 9504) -> ThreadingHTTPServer:
     """Spin up the debug HTTP server in a daemon thread and return the
     server handle so the caller can `shutdown()` it on exit."""
     handler = _make_handler(state)
@@ -203,8 +258,17 @@ def start(state: Any, host: str = "127.0.0.1", port: int = 9504) -> ThreadingHTT
         target=server.serve_forever, daemon=True, name="ik-engine-gui"
     )
     thread.start()
+    # When binding to 0.0.0.0 the literal address isn't a URL anyone
+    # can dial — list the reachable IPv4s so the user knows what to
+    # type from their laptop. Falls back to whatever they passed if
+    # detection fails.
+    if host in ("0.0.0.0", "::", ""):
+        candidates = _local_ipv4s() or ["127.0.0.1"]
+        urls = ", ".join(f"http://{ip}:{port}" for ip in candidates)
+    else:
+        urls = f"http://{host}:{port}"
     _log.warning(
-        "debug GUI: open http://%s:%d  (chain: %s → %s, %d movable joints)",
-        host, port, state.chain.base, state.chain.tip, len(state.chain.movable),
+        "debug GUI listening on %s:%d → %s  (chain: %s → %s, %d movable joints)",
+        host, port, urls, state.chain.base, state.chain.tip, len(state.chain.movable),
     )
     return server
