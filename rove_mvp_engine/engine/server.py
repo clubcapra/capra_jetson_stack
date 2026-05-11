@@ -32,11 +32,12 @@ import logging
 import math
 import socket
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
 
+from . import collision as collision_mod
 from . import ik as ik_math
 from . import proto as pb
 
@@ -57,6 +58,12 @@ class State:
     # real robot was commanded externally).
     target_pos: np.ndarray | None = None
     target_R: np.ndarray | None = None
+    # Collision world (trimesh + python-fcl). None if libs unavailable
+    # — position_ik then skips collision checks silently.
+    collision_world: "object | None" = None
+    # Maps chain joint entity_id → URDF joint name, so the collision
+    # world (which speaks URDF) can be fed chain q values.
+    chain_q_to_urdf: dict[str, str] = field(default_factory=dict)
 
     # ---- debug-UI snapshot fields ----
     # Filled on every UDP rx / IK solve. Always written (cheap), but
@@ -87,7 +94,26 @@ def _make_state(chain_path: Path, profile_path: Path) -> State:
     for jid, v in (profile.rest_pose or {}).items():
         if jid in q0:
             q0[jid] = float(v)
-    return State(chain=chain, profile=profile, q=q0)
+
+    # Build the collision world from the same data bundle (URDF lives
+    # alongside chain.json / ik_profile.json under data/). If trimesh
+    # or python-fcl aren't installed, world stays None and IK skips
+    # collision checks with a single log line at startup.
+    urdf_path = chain_path.parent / "robot.urdf"
+    collision_world = collision_mod.try_build_world(urdf_path)
+
+    # chain.json's joint `name` field is the URDF joint name (we use the
+    # same disambiguation URDFExporter does); map entity_id → URDF name
+    # so the IK can feed the collision world URDF-keyed q values.
+    chain_q_to_urdf = {j.id: j.name for j in chain.movable}
+
+    return State(
+        chain=chain,
+        profile=profile,
+        q=q0,
+        collision_world=collision_world,
+        chain_q_to_urdf=chain_q_to_urdf,
+    )
 
 
 # ---- UDP protocols ----
@@ -198,28 +224,85 @@ def _solve(state: State, twist: pb.Twist) -> pb.JointCommand:
             cmd.joints.append(pb.NamedFloat(name=jid, value=float(val)))
         return cmd
 
-    # POSITION_IK: integrate twist over a fixed dt to a moving target.
-    # We anchor the target to the current FK pose if we don't have a
-    # running target yet, or if the joints have been displaced by an
-    # external command (heuristic: ||q − target_q|| > threshold).
+    # POSITION_IK: integrate twist over a fixed dt to a moving target,
+    # solve iteratively (this is the same pose_locked solver the editor's
+    # IK gizmo uses), then emit the result as a *velocity* command so the
+    # morpher's existing RESOLVED_RATE forwarding handles it. Without
+    # this re-emit, position_ik output would be a joint *position* —
+    # which the morpher (run_velocs_listener) silently drops.
     dt = 1.0 / 30.0  # treat each twist packet as ~33 ms of motion
     T_tip, _ = ik_math.fk(state.chain, state.q)
+
+    # When the user releases the stick (twist below the deadband), park the
+    # IK target ON the current FK pose. Otherwise the residual integrated
+    # target stays where it was, and the IK keeps grinding the arm toward
+    # it long after the user let go (we saw joints pegged at ±velocity_max
+    # 11s after the last non-zero twist).
+    twist_deadband = 1e-3 * max(profile.max_lin_vel, profile.max_ang_vel)
+    twist_active = bool(np.any(np.abs(v) > twist_deadband))
+    if not twist_active:
+        state.target_pos = T_tip[:3, 3].copy()
+        state.target_R = T_tip[:3, :3].copy()
+        # No motion to issue: skip the solve, emit all-zero q_dot.
+        cmd.mode = pb.RESOLVED_RATE
+        for j in state.chain.movable:
+            cmd.joints.append(pb.NamedFloat(name=j.id, value=0.0))
+        return cmd
+
     if state.target_pos is None:
         state.target_pos = T_tip[:3, 3].copy()
-        state.target_R = T_tip[:3, :3].copy() if v[3:].any() else None
+        # Snapshot orientation on first twist so pose_locked has a target_R
+        # to hold to — even for pure translation (v[3:] = 0).
+        state.target_R = T_tip[:3, :3].copy()
     state.target_pos = state.target_pos + v[:3] * dt
     if state.target_R is not None and v[3:].any():
-        # Compose target orientation with the integrated angular velocity.
         omega = v[3:] * dt
         state.target_R = ik_math._axis_angle_to_R(omega, np.linalg.norm(omega)) @ state.target_R
+    # Target leash: cap how far target_pos sits ahead of current FK tip so
+    # the 5-DOF solver always has a *reachable* target and pose_locked
+    # actually gets to lock orientation. The leash only clips when target
+    # is already ahead — it doesn't pull target back behind the arm, and
+    # when the user stops, the deadband branch above resets it cleanly.
+    LEASH_M = 0.05
+    offset = state.target_pos - T_tip[:3, 3]
+    dist = float(np.linalg.norm(offset))
+    if dist > LEASH_M:
+        state.target_pos = T_tip[:3, 3] + offset * (LEASH_M / dist)
 
     res = ik_math.position_ik(
         state.chain, state.q, state.target_pos, state.target_R, profile,
     )
+    cmd.mode = pb.RESOLVED_RATE  # re-tag so the morpher forwards as velocity
     cmd.converged = res.converged
     cmd.residual = float(res.residual)
-    for jid, val in res.q.items():
-        cmd.joints.append(pb.NamedFloat(name=jid, value=float(val)))
+    # SAFETY caps. The URDF binding does not match the real arm exactly
+    # (verified: the IK ran joints to ±1 rad/s long after the twist stopped
+    # and broke the arm). Until the model is validated, every q_dot is
+    # clamped on THREE axes:
+    #   1. A conservative global ceiling (SAFETY_VEL_MAX, well below
+    #      j.velocity), so worst-case the arm crawls.
+    #   2. Joint position-limit avoidance: if q is within MARGIN of a hard
+    #      stop and q_dot would push it further into the stop, ramp q_dot
+    #      to zero linearly.
+    #   3. Per-joint velocity ceiling from chain.json.
+    SAFETY_VEL_MAX = 0.3  # rad/s — ~17 °/s per joint, deliberately slow
+    MARGIN_FRAC = 0.10
+    movable_by_id = {j.id: j for j in state.chain.movable}
+    for jid, q_target in res.q.items():
+        q_dot = (float(q_target) - float(state.q.get(jid, 0.0))) / dt
+        j_spec = movable_by_id.get(jid)
+        if j_spec is not None:
+            cur = float(state.q.get(jid, 0.0))
+            span = max(j_spec.upper - j_spec.lower, 1e-9)
+            margin = MARGIN_FRAC * span
+            if q_dot > 0 and cur > j_spec.upper - margin:
+                q_dot *= max(0.0, (j_spec.upper - cur) / margin)
+            elif q_dot < 0 and cur < j_spec.lower + margin:
+                q_dot *= max(0.0, (cur - j_spec.lower) / margin)
+            cap = min(j_spec.velocity if j_spec.velocity > 0 else SAFETY_VEL_MAX, SAFETY_VEL_MAX)
+            if abs(q_dot) > cap:
+                q_dot = math.copysign(cap, q_dot)
+        cmd.joints.append(pb.NamedFloat(name=jid, value=q_dot))
     return cmd
 
 

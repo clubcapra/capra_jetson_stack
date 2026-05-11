@@ -91,10 +91,13 @@ class Profile:
     max_iter: int = 60                  # POSITION_IK iterations
     orientation_weight: float = 5.0
     joint_weight_strength: float = 0.0
+    joint_limit_avoidance: float = 0.5  # cubic penalty pulling away from limits
     max_dq_step: float = 0.05           # rad per joint per iter (POSITION_IK)
     max_pos_step: float = 0.05          # m per iter (POSITION_IK)
+    max_rot_step: float = 0.30          # rad per iter on orientation error
     max_total_dq_step: float | None = 0.10
     orientation_secondary_gain: float = 0.5
+    step: float = 1.0                   # global step-size multiplier
     # Velocity scaling for the normalized [-1, 1] twist input.
     max_lin_vel: float = 0.25           # m/s when |position.{x,y,z}| = 1
     max_ang_vel: float = 1.0            # rad/s when |orientation.{...}| = 1
@@ -318,100 +321,263 @@ def position_ik(
     target_R: np.ndarray | None,
     profile: Profile,
     *,
-    tol: float = 1e-3,
+    tol: float = 1e-4,
+    tcp_offset_local: np.ndarray | None = None,
+    collision_world: "object | None" = None,
+    chain_q_to_urdf: dict[str, str] | None = None,
 ) -> IKResult:
-    """Solve for joint positions that put the tip at target_pos / target_R.
+    """Faithful clone of forge's solve_position_ik.
 
-    Damped least squares with optional null-space rest-pose pull.
-    Mode follows `profile.mode`:
-       "pose_locked": position+orientation in primary task (6 rows)
-       "pos_primary": position primary (3 rows), orientation secondary
-                      via null-space projector
+    Uses SVD-based truncated pseudo-inverse with adaptive damping (gives
+    well-behaved motion near singularities), Liégeois-style null-space
+    projection for secondary objectives (rest-pose pull + cubic joint-
+    limit avoidance), and task-priority orientation in pos_primary mode.
+    Per-iteration step caps on Cartesian error AND a per-call cap on
+    cumulative joint motion (`max_total_dq_step`), with residuals
+    recomputed after the cumulative clamp so the caller's HUD reflects
+    the actually-achieved error.
+
+    The two solvers must stay in sync — if you fix something here, mirror
+    it in `forge/backend/forgebot/core/kinematics/inverse.py`.
     """
     movable = chain.movable
     n = len(movable)
-    q = {j.id: q_init.get(j.id, 0.0) for j in movable}
+    if n == 0:
+        return IKResult(q=dict(q_init), iterations=0, residual=0.0, converged=True)
 
-    pose_locked = profile.mode == "pose_locked" and target_R is not None
+    q: dict[str, float] = {j.id: float(q_init.get(j.id, 0.0)) for j in movable}
+    q_initial: dict[str, float] = dict(q)
+
     has_rot = target_R is not None
+    pose_mode = has_rot and profile.mode != "pos_primary"
     rest = profile.rest_pose or {}
-    lam_sq = max(profile.damping, 1e-6) ** 2
+    rows = 6 if pose_mode else 3
+    damp_sq = max(profile.damping, 1e-6) ** 2
+    sv_threshold = 0.05
+    step = profile.step
 
-    res = float("inf")
+    # Tapered joint weights: joints closer to the base get smaller weights
+    # (move more readily) than joints near the tip — matches the editor's
+    # joint_weight_strength behaviour.
+    alpha = max(0.0, min(1.0, profile.joint_weight_strength))
+    tapered = np.array(
+        [max(1.0, 50.0 * (0.4 ** depth)) for depth in range(n)],
+        dtype=float,
+    )
+    weights = (1.0 - alpha) * np.ones(n) + alpha * tapered
+    w_inv = 1.0 / weights
+    s_w = np.sqrt(w_inv)
+
+    last_residual = float("inf")
     converged = False
     it = 0
+    tcp = (
+        np.asarray(tcp_offset_local, dtype=np.float64)
+        if tcp_offset_local is not None
+        else None
+    )
+
+    # Collision baseline: capture the pairs already colliding at the
+    # starting q (e.g., chassis self-overlaps in the URDF). The iteration
+    # only breaks if a *new* pair appears — mirrors solve_position_ik.
+    def _q_to_urdf(q_local: dict[str, float]) -> dict[str, float]:
+        if not chain_q_to_urdf:
+            return {}
+        return {chain_q_to_urdf[jid]: v for jid, v in q_local.items() if jid in chain_q_to_urdf}
+
+    baseline_pairs: frozenset = frozenset()
+    if collision_world is not None:
+        try:
+            baseline_pairs = frozenset(
+                tuple(sorted((p.a, p.b)))
+                for p in collision_world.check(_q_to_urdf(q))
+            )
+        except Exception:  # noqa: BLE001
+            collision_world = None
     for it in range(profile.max_iter):
         J6, T_tip = jacobian(chain, q)
-        p_tip = T_tip[:3, 3]
-        R_tip = T_tip[:3, :3]
-        e_pos = target_pos - p_tip
-        e_rot = (
-            _R_to_axis_angle(target_R @ R_tip.T)
-            if has_rot else np.zeros(3)
-        )
-        # Step-size cap on per-iter Cartesian motion (prevents jumps).
-        np_e_pos = np.linalg.norm(e_pos)
-        if np_e_pos > profile.max_pos_step:
-            e_pos = e_pos * (profile.max_pos_step / np_e_pos)
-        np_e_rot = np.linalg.norm(e_rot)
-        if np_e_rot > 0.30:
-            e_rot = e_rot * (0.30 / np_e_rot)
-
-        if pose_locked:
-            err = np.concatenate([e_pos, profile.orientation_weight * e_rot])
-            J = J6.copy()
-            J[3:] *= profile.orientation_weight
-            A = J @ J.T + lam_sq * np.eye(6)
-            v = np.linalg.solve(A, err)
-            dq = J.T @ v
+        ee_R = T_tip[:3, :3]
+        # If a TCP offset is given, the position task targets the TCP (tip
+        # link origin + R_tip @ tcp_offset). The Jacobian must reflect this:
+        # the position rows are built from cross(axis_world, ee_pos − joint_pos)
+        # already inside `jacobian()` *using the tip-origin point*. We add
+        # the offset contribution: d(ee_pos)/dq = J_pos + skew(axis_world) @
+        # (R_tip @ tcp) for revolute joints, which simplifies to recomputing
+        # J_pos with the TCP point. The cleanest way is to add the correction
+        # term to the existing J_pos rows: cross(axis_world, R_tip @ tcp).
+        if tcp is not None:
+            tcp_world = ee_R @ tcp
+            ee_pos = T_tip[:3, 3] + tcp_world
+            # axis_world for each joint is recoverable from J_rot rows (J6[3:])
+            # — that's already axis_world (× sign for inverted). Append the
+            # offset cross product to the position rows.
+            J6 = J6.copy()
+            for i in range(J6.shape[1]):
+                axis_w = J6[3:, i]  # already sign-flipped if inverted
+                J6[:3, i] = J6[:3, i] + np.cross(axis_w, tcp_world)
         else:
-            J = J6[:3]
-            err = e_pos
-            A = J @ J.T + lam_sq * np.eye(3)
-            v = np.linalg.solve(A, err)
-            dq = J.T @ v
-            # Null-space secondaries: orientation pull (if has_rot) and
-            # rest-pose pull. Project secondary delta through (I − J⁺J).
-            Jp = J.T @ np.linalg.solve(A, np.eye(3))  # damped pseudoinverse
-            null_proj = np.eye(n) - Jp @ J
-            secondary = np.zeros(n)
-            if has_rot:
-                # Map orientation error back into joint space using full J.
-                Aw = J6[3:] @ J6[3:].T + lam_sq * np.eye(3)
-                dq_rot = J6[3:].T @ np.linalg.solve(Aw, e_rot)
-                secondary += profile.orientation_secondary_gain * dq_rot
-            if rest:
-                pull = np.array([
-                    (rest.get(j.id, q[j.id]) - q[j.id]) * profile.rest_pose_gain
-                    for j in movable
-                ])
-                secondary += pull
-            dq = dq + null_proj @ secondary
+            ee_pos = T_tip[:3, 3]
+        pos_err = target_pos - ee_pos
+        rot_err_raw = (
+            _R_to_axis_angle(target_R @ ee_R.T) if has_rot else np.zeros(3)
+        )
 
-        # Clamp per-joint dq.
-        if profile.max_dq_step > 0:
-            mx = float(np.max(np.abs(dq))) if dq.size else 0.0
-            if mx > profile.max_dq_step:
-                dq = dq * (profile.max_dq_step / mx)
-        # Clamp total ||dq||_∞ across the call (across iterations) — we
-        # approximate "across the call" as "across this iteration".
-        if profile.max_total_dq_step is not None:
-            mx = float(np.max(np.abs(dq))) if dq.size else 0.0
-            if mx > profile.max_total_dq_step:
-                dq = dq * (profile.max_total_dq_step / mx)
-
-        # Apply with joint-limit clamp.
-        for col, j in enumerate(movable):
-            new = q[j.id] + float(dq[col])
-            if j.upper > j.lower:
-                new = max(j.lower, min(j.upper, new))
-            q[j.id] = new
-
-        res = float(np.linalg.norm(e_pos))
-        if has_rot:
-            res = math.sqrt(res * res + np.linalg.norm(e_rot) ** 2)
-        if res < tol:
+        unscaled = np.concatenate([pos_err, rot_err_raw]) if pose_mode else pos_err
+        residual = float(np.linalg.norm(unscaled))
+        last_residual = residual
+        if residual < tol and (
+            profile.mode != "pos_primary" or np.linalg.norm(rot_err_raw) < tol
+        ):
             converged = True
             break
 
-    return IKResult(q=q, iterations=it + 1, residual=res, converged=converged)
+        # Cap Cartesian step magnitudes to keep linearization valid.
+        pos_norm = float(np.linalg.norm(pos_err))
+        if pos_norm > profile.max_pos_step:
+            pos_err = pos_err * (profile.max_pos_step / pos_norm)
+        rot_norm = float(np.linalg.norm(rot_err_raw))
+        if rot_norm > profile.max_rot_step:
+            rot_err_raw = rot_err_raw * (profile.max_rot_step / rot_norm)
+
+        if pose_mode:
+            err = np.concatenate([pos_err, profile.orientation_weight * rot_err_raw])
+            J = J6.copy()
+            J[3:] *= profile.orientation_weight
+        else:
+            err = pos_err
+            J = J6[:3].copy()
+        J_rot = J6[3:].copy()  # unweighted rotation rows for task-priority block
+
+        # SVD-based damped pseudo-inverse with adaptive damping near small
+        # singular values — keeps `dq` bounded across singularities instead
+        # of blowing up like a plain DLS.
+        J_w = J * s_w
+        try:
+            U, sigma, Vt = np.linalg.svd(J_w, full_matrices=False)
+        except np.linalg.LinAlgError:
+            break
+        lam_sq = damp_sq + np.maximum(0.0, sv_threshold * sv_threshold - sigma * sigma)
+        sigma_inv = sigma / (sigma * sigma + lam_sq)
+        u_primary = Vt.T @ (sigma_inv * (U.T @ err))
+        dq = s_w * u_primary
+
+        # Secondary objectives (Liégeois null-space projection):
+        #   - rest-pose pull
+        #   - cubic joint-limit avoidance
+        secondary = np.zeros(n)
+        q_vec = np.array([q[j.id] for j in movable])
+        if rest and profile.rest_pose_gain > 0.0:
+            rest_vec = np.array([float(rest.get(j.id, q[j.id])) for j in movable])
+            secondary = secondary + profile.rest_pose_gain * (rest_vec - q_vec)
+        if profile.joint_limit_avoidance > 0.0:
+            for i, j in enumerate(movable):
+                if j.upper <= j.lower:
+                    continue
+                center = 0.5 * (j.lower + j.upper)
+                half = 0.5 * (j.upper - j.lower)
+                norm = (q_vec[i] - center) / half
+                secondary[i] -= profile.joint_limit_avoidance * (norm ** 3) * half
+        if np.any(secondary != 0):
+            secondary_u = secondary / s_w
+            eff = sigma > sv_threshold
+            if np.any(eff):
+                V_eff_t = Vt[eff]
+                proj_u = secondary_u - V_eff_t.T @ (V_eff_t @ secondary_u)
+            else:
+                proj_u = secondary_u
+            dq = dq + s_w * proj_u
+
+        # Task-priority rotation in pos_primary mode: solve for the dq that
+        # reduces orientation error *within* the null space of the position
+        # task. Distinct from Liégeois secondaries because for a Cartesian
+        # rotation task, projection-then-solve gives an exact damped Newton
+        # step, not a slow gradient.
+        if (
+            profile.mode == "pos_primary"
+            and has_rot
+            and profile.orientation_secondary_gain > 0.0
+        ):
+            eff = sigma > sv_threshold
+            if np.any(eff):
+                V_eff = Vt[eff].T
+                N_w = np.eye(n) - V_eff @ V_eff.T
+            else:
+                N_w = np.eye(n)
+            J_rot_w = J_rot * s_w
+            J_rot_proj = J_rot_w @ N_w
+            try:
+                U_r, sig_r, Vt_r = np.linalg.svd(J_rot_proj, full_matrices=False)
+            except np.linalg.LinAlgError:
+                pass
+            else:
+                lam_r_sq = damp_sq + np.maximum(
+                    0.0, sv_threshold * sv_threshold - sig_r * sig_r
+                )
+                sig_r_inv = sig_r / (sig_r * sig_r + lam_r_sq)
+                u_rot = Vt_r.T @ (sig_r_inv * (U_r.T @ rot_err_raw))
+                dq_rot = s_w * u_rot
+                dq = dq + profile.orientation_secondary_gain * dq_rot
+
+        dq = step * dq
+
+        # Per-iter clamp.
+        dq_inf = float(np.max(np.abs(dq))) if dq.size else 0.0
+        if dq_inf > profile.max_dq_step:
+            dq = dq * (profile.max_dq_step / dq_inf)
+
+        # Apply with joint-position-limit clamp.
+        candidate_q = dict(q)
+        for i, j in enumerate(movable):
+            new_val = q[j.id] + float(dq[i])
+            if j.upper > j.lower:
+                new_val = max(j.lower, min(j.upper, new_val))
+            candidate_q[j.id] = new_val
+
+        # Collision check (editor parity): if the candidate q introduces a
+        # NEW colliding pair (one not already in the baseline), reject this
+        # iteration and stop — q stays at the previous step.
+        if collision_world is not None:
+            try:
+                new_pairs = frozenset(
+                    tuple(sorted((p.a, p.b)))
+                    for p in collision_world.check(_q_to_urdf(candidate_q))
+                )
+            except Exception:  # noqa: BLE001
+                new_pairs = baseline_pairs
+            if new_pairs - baseline_pairs:
+                break
+
+        # Per-call cap on cumulative joint motion across iterations.
+        # Editor parity: when triggered, clamp candidate_q back to within the
+        # cap, recompute residuals at the clamped pose, and stop iterating.
+        if profile.max_total_dq_step is not None and profile.max_total_dq_step > 0:
+            diff_inf = max(
+                (abs(candidate_q[jid] - q_initial[jid]) for jid in candidate_q),
+                default=0.0,
+            )
+            if diff_inf > profile.max_total_dq_step:
+                scale = profile.max_total_dq_step / diff_inf
+                for jid in candidate_q:
+                    candidate_q[jid] = q_initial[jid] + scale * (candidate_q[jid] - q_initial[jid])
+                q = candidate_q
+                # `jacobian()` returns (J, T_tip) — we want the latter for FK.
+                _J_final, T_final = jacobian(chain, q)
+                ee_pos_final = T_final[:3, 3]
+                if tcp is not None:
+                    ee_pos_final = ee_pos_final + T_final[:3, :3] @ tcp
+                pos_err_final = target_pos - ee_pos_final
+                pos_r = float(np.linalg.norm(pos_err_final))
+                if has_rot:
+                    rot_err_final = _R_to_axis_angle(target_R @ T_final[:3, :3].T)
+                    last_residual = math.sqrt(
+                        pos_r * pos_r + float(np.linalg.norm(rot_err_final)) ** 2
+                    )
+                else:
+                    last_residual = pos_r
+                break
+
+        q = candidate_q
+
+    return IKResult(
+        q=q, iterations=it + 1, residual=last_residual, converged=converged
+    )

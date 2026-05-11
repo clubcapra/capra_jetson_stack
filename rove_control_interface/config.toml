@@ -33,8 +33,13 @@ twist_port = 9502
 # Where the engine sends its JointCommand replies. We bind here.
 velocs_listen_host = "0.0.0.0"
 velocs_listen_port = 9503
-# Twist solve mode: "resolved_rate" (velocity output) or "position_ik".
-mode = "resolved_rate"
+# Twist solve mode: "resolved_rate" or "position_ik".
+# position_ik uses the engine's iterative pose_locked solver (same as the
+# editor's IK gizmo), then re-emits the result as a velocity command so the
+# morpher's RESOLVED_RATE-style forwarding handles it. This is the right
+# mode for the rove arm because it's 5-DOF and orientation drifts under
+# plain resolved_rate.
+mode = "position_ik"
 
 # --- Kinova arm link (rove_sensor_api on the rover) ---
 [kinova]
@@ -66,7 +71,10 @@ home_deg = 275.02
 ik_id = "ent_joint_2c15d7d3"
 kinova_idx = 2
 home_deg = 174.97
-invert = true
+# invert removed: with POSITION_IK now working, the user observed that
+# the real arm's joint 2 was driving opposite to the sim/ghost. Flipping
+# this flag flips BOTH input (encoder→q_engine) and output (q_dot→arm
+# velocity) — verify the sim still tracks the real arm after this.
 
 [[joint_map]]
 ik_id = "ent_joint_d6fa25aa"

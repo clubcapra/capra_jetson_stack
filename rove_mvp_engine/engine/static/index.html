@@ -176,6 +176,14 @@
       <label><input type="checkbox" id="toggle-actual"  checked> actual (real arm)</label>
       <label><input type="checkbox" id="toggle-target"  checked> IK target (ghost)</label>
       <label><input type="checkbox" id="toggle-grid"    checked> grid</label>
+      <label><input type="checkbox" id="toggle-gizmo"          > IK gizmo</label>
+      <label style="margin-left:6px">mode
+        <select id="gizmo-mode">
+          <option value="translate" selected>translate</option>
+          <option value="rotate">rotate</option>
+        </select>
+      </label>
+      <button id="gizmo-snap" type="button" title="Snap gizmo back to end-effector">snap to EE</button>
     </div>
   </header>
   <main>
@@ -226,6 +234,11 @@
         <h2>End-effector pose (FK at q)</h2>
         <div class="pose-grid" id="ee-pose"></div>
       </section>
+
+      <section class="panel">
+        <h2>IK-commanded EE velocity (world frame)</h2>
+        <div class="pose-grid" id="ee-vel"></div>
+      </section>
     </aside>
   </main>
 
@@ -234,6 +247,7 @@
 
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { TransformControls } from "three/addons/controls/TransformControls.js";
 import { STLLoader } from "three/addons/loaders/STLLoader.js";
 import { ColladaLoader } from "three/addons/loaders/ColladaLoader.js";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
@@ -304,6 +318,126 @@ const controls = new OrbitControls(camera, renderer.domElement);
 controls.target.set(0, 0, 0.2);
 controls.enableDamping = true;
 controls.dampingFactor = 0.12;
+
+// ---- IK gizmo --------------------------------------------------
+// A draggable proxy object placed at the end-effector. When the user
+// drags it, we POST {target_pos, target_quat} to /ik; the engine runs
+// the same position_ik the editor uses against state.q, writes the
+// result back into state.q, and the next /state poll re-renders the
+// arm. Pure sim, no UDP, no real arm — used to validate IK before
+// hooking up teleop. Toggle visibility from the header.
+const gizmoProxy = new THREE.Object3D();
+scene.add(gizmoProxy);
+const tcontrols = new TransformControls(camera, renderer.domElement);
+tcontrols.attach(gizmoProxy);
+tcontrols.setMode("translate");
+tcontrols.setSize(0.5);
+tcontrols.visible = false;
+tcontrols.enabled = false;
+scene.add(tcontrols);
+// Standard pattern: orbit and transform can't both grab the mouse at
+// the same time. Disable orbit while the user is dragging the gizmo.
+tcontrols.addEventListener("dragging-changed", (e) => {
+  controls.enabled = !e.value;
+});
+
+// Centroid of the tip link's visual geometry, expressed in tip-link
+// LOCAL coordinates. Filled once after URDF + first /state arrive (we
+// need /state to identify the tip link via the last chain joint).
+// The gizmo snaps to (ee_pos + R_ee @ tcpOffsetLocal) — the visual
+// centroid of the gripper — instead of the bare link origin, and the
+// same offset is passed to /ik so position_ik drives that centroid
+// to the target.
+let tcpOffsetLocal = null;  // [x,y,z] in tip-link local frame
+let tipLinkObject = null;
+
+function computeLocalBBoxCenter(obj) {
+  // BBox of `obj` and all its descendant meshes, expressed in obj's
+  // local frame. obj.updateMatrixWorld must be current.
+  obj.updateMatrixWorld(true);
+  const objWorldInv = new THREE.Matrix4().copy(obj.matrixWorld).invert();
+  const box = new THREE.Box3();
+  const m = new THREE.Matrix4();
+  obj.traverse((child) => {
+    if (child.isMesh && child.geometry) {
+      child.updateMatrixWorld(true);
+      m.multiplyMatrices(objWorldInv, child.matrixWorld);
+      if (!child.geometry.boundingBox) child.geometry.computeBoundingBox();
+      const gb = child.geometry.boundingBox.clone();
+      gb.applyMatrix4(m);
+      box.union(gb);
+    }
+  });
+  if (box.isEmpty()) return new THREE.Vector3(0, 0, 0);
+  return box.getCenter(new THREE.Vector3());
+}
+
+function maybeComputeTcpOffset(joints) {
+  if (tcpOffsetLocal !== null || !robotActual || !joints || joints.length === 0) return;
+  // Find the chain's tip link via the LAST joint's child in the URDF.
+  const lastJointName = joints[joints.length - 1].name;
+  const joint = robotActual.joints && robotActual.joints[lastJointName];
+  if (!joint) return;
+  // URDFJoint exposes the child Object3D as a member. Different
+  // URDFLoader builds use different names; check both.
+  const child = joint.children.find(
+    (c) => c.isURDFLink || c.urdfNode === "link" || c.type === "URDFLink"
+  ) || joint.children[0];
+  if (!child) return;
+  tipLinkObject = child;
+  const center = computeLocalBBoxCenter(child);
+  tcpOffsetLocal = [center.x, center.y, center.z];
+  console.log("TCP offset (tip-link local):", tcpOffsetLocal);
+}
+
+let ikInFlight = false;
+let ikDirty = false;
+async function postIK() {
+  if (ikInFlight) { ikDirty = true; return; }
+  ikInFlight = true;
+  try {
+    const p = gizmoProxy.position;
+    const q = gizmoProxy.quaternion;
+    const payload = {
+      target_pos: [p.x, p.y, p.z],
+      target_quat: [q.x, q.y, q.z, q.w],
+    };
+    if (tcpOffsetLocal) payload.tcp_offset_local = tcpOffsetLocal;
+    const r = await fetch("/ik", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(payload),
+    });
+    if (!r.ok) console.warn("ik:", r.status, await r.text());
+  } catch (e) {
+    console.warn("ik error:", e);
+  } finally {
+    ikInFlight = false;
+    if (ikDirty) { ikDirty = false; postIK(); }
+  }
+}
+// The 'change' event fires continuously while dragging — coalesce via
+// the in-flight guard above so we don't queue dozens of solves per drag.
+tcontrols.addEventListener("change", () => {
+  if (tcontrols.dragging) postIK();
+});
+
+function snapGizmoToEE() {
+  // Place the gizmo at the current FK EE pose. We pull from /state's
+  // cached ee_pos/ee_rpy on next poll — see snapPendingFromState below.
+  snapPending = true;
+}
+let snapPending = true;  // snap on first /state arrival
+
+document.getElementById("toggle-gizmo").addEventListener("change", (e) => {
+  tcontrols.visible = e.target.checked;
+  tcontrols.enabled = e.target.checked;
+  if (e.target.checked) snapGizmoToEE();
+});
+document.getElementById("gizmo-mode").addEventListener("change", (e) => {
+  tcontrols.setMode(e.target.value);
+});
+document.getElementById("gizmo-snap").addEventListener("click", snapGizmoToEE);
 
 function resize() {
   const w = viewportEl.clientWidth;
@@ -584,6 +718,18 @@ function renderPose(pos, rpy) {
   `;
 }
 
+function renderEEVel(v) {
+  const root = document.getElementById("ee-vel");
+  if (!v) { root.innerHTML = `<div class="k">linear</div><div class="v">—</div>`; return; }
+  const w = v.slice(3).map(x => x * RAD_TO_DEG);
+  root.innerHTML = `
+    <div class="k">linear</div>
+    <div class="v">x=${v[0].toFixed(4)}  y=${v[1].toFixed(4)}  z=${v[2].toFixed(4)} <span style="color:var(--dim)">m/s</span></div>
+    <div class="k">angular</div>
+    <div class="v">wx=${w[0].toFixed(2)}  wy=${w[1].toFixed(2)}  wz=${w[2].toFixed(2)} <span style="color:var(--dim)">°/s</span></div>
+  `;
+}
+
 // ---- toggles for the viewport overlay layers ---------------------
 
 document.getElementById("toggle-actual").addEventListener("change", (e) => {
@@ -634,6 +780,29 @@ async function poll() {
   renderTwist(s.twist);
   renderCmd(s.cmd, s.joints);
   renderPose(s.ee_pos, s.ee_rpy);
+  renderEEVel(s.ee_vel_world);
+
+  // Resolve the tip link & compute the centroid offset once we have
+  // both the URDF and the chain joint list.
+  if (tcpOffsetLocal === null) maybeComputeTcpOffset(s.joints);
+
+  // Snap the gizmo to (current EE origin) + R_ee @ tcpOffsetLocal so
+  // the gizmo sits at the visible centroid of the gripper, not the
+  // bare link origin. Skip during an active drag so we don't fight
+  // the user's hand.
+  if (snapPending && !tcontrols.dragging && s.ee_pos) {
+    const [roll, pitch, yaw] = s.ee_rpy || [0, 0, 0];
+    const eul = new THREE.Euler(roll, pitch, yaw, "ZYX");
+    const quat = new THREE.Quaternion().setFromEuler(eul);
+    let pos = new THREE.Vector3(s.ee_pos[0], s.ee_pos[1], s.ee_pos[2]);
+    if (tcpOffsetLocal) {
+      const off = new THREE.Vector3(...tcpOffsetLocal).applyQuaternion(quat);
+      pos = pos.add(off);
+    }
+    gizmoProxy.position.copy(pos);
+    gizmoProxy.quaternion.copy(quat);
+    snapPending = false;
+  }
   document.getElementById("js-rx").textContent    = s.stats.js_rx.toLocaleString();
   document.getElementById("twist-rx").textContent = s.stats.twist_rx.toLocaleString();
   document.getElementById("cmd-tx").textContent   = s.stats.cmd_tx.toLocaleString();

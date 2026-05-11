@@ -123,6 +123,28 @@ def _snapshot(state: Any) -> dict:
         ee_pos = [0.0, 0.0, 0.0]
         ee_rpy = [0.0, 0.0, 0.0]
 
+    # Reconstruct the world-frame end-effector velocity the IK is *actually*
+    # driving toward from the last JointCommand: ee_vel = J(q) · q_dot. This
+    # is the diagnostic that tells "is IK solving correctly in URDF world
+    # frame?" apart from "is the wrapper/teleop sending twist in a different
+    # frame?". If you push +X linear on teleop and see ee_vel_world.x > 0
+    # here while the arm moves elsewhere, the IK is right and the frame
+    # mismatch is upstream (teleop or kinova base alignment).
+    ee_vel_world = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    last_cmd_for_jac = getattr(state, "last_cmd", None)
+    if last_cmd_for_jac is not None and int(last_cmd_for_jac.mode) == 0:
+        try:
+            import numpy as np
+            J, _ = ik_math.jacobian(chain, state.q)
+            qd_by_id = {j.name: float(j.value) for j in last_cmd_for_jac.joints}
+            qdot = np.array(
+                [qd_by_id.get(j.id, 0.0) for j in chain.movable], dtype=np.float64
+            )
+            v = (J @ qdot).tolist()
+            ee_vel_world = [float(x) for x in v]
+        except Exception:  # noqa: BLE001
+            pass
+
     joints = [
         {
             "id": j.id,
@@ -179,6 +201,7 @@ def _snapshot(state: Any) -> dict:
         "cmd": cmd,
         "ee_pos": ee_pos,
         "ee_rpy": ee_rpy,
+        "ee_vel_world": ee_vel_world,
         "ts": {
             "last_joint_state_us": int(getattr(state, "last_joint_state_us", 0)),
             "last_twist_us": int(getattr(state, "last_twist_us", 0)),
@@ -212,6 +235,78 @@ def _make_handler(state: Any):
             if path == "/" or path == "":
                 path = "/index.html"
             self._serve_file(path.lstrip("/"), _STATIC_DIR)
+
+        def do_POST(self) -> None:  # noqa: D401, N802
+            path = self.path.split("?", 1)[0]
+            if path == "/ik":
+                length = int(self.headers.get("Content-Length", "0"))
+                try:
+                    body = json.loads(self.rfile.read(length) or b"{}")
+                except Exception:
+                    self.send_error(400, "bad JSON")
+                    return
+                try:
+                    self._write_json(self._handle_ik(body))
+                except Exception as e:  # noqa: BLE001
+                    _log.exception("ik solve failed: %s", e)
+                    self.send_error(500, f"ik solve failed: {e}")
+                return
+            self.send_error(404)
+
+        def _handle_ik(self, body: dict) -> dict:
+            """Closed-loop gizmo IK.
+
+            Request: {"target_pos": [x,y,z], "target_quat": [x,y,z,w] | null}
+            Behaviour: run the same position_ik the editor uses, against the
+            engine's CURRENT q (so the next call picks up where this one left
+            off), and write the result back into state.q. The debug GUI's
+            /state poll then renders the updated arm — no real-arm coupling,
+            no UDP. Perfect for validating the IK in pure sim.
+            """
+            target_pos = np.asarray(body.get("target_pos") or [0.0, 0.0, 0.0], dtype=np.float64)
+            quat = body.get("target_quat")
+            target_R: "np.ndarray | None"
+            if quat is not None and len(quat) == 4:
+                x, y, z, w = (float(v) for v in quat)
+                target_R = np.array([
+                    [1 - 2 * (y * y + z * z),     2 * (x * y - w * z), 2 * (x * z + w * y)],
+                    [    2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x)],
+                    [    2 * (x * z - w * y),     2 * (y * z + w * x), 1 - 2 * (x * x + y * y)],
+                ], dtype=np.float64)
+            else:
+                target_R = None
+
+            tcp_offset = body.get("tcp_offset_local")
+            tcp_arr = (
+                np.asarray(tcp_offset, dtype=np.float64)
+                if tcp_offset is not None and len(tcp_offset) == 3
+                else None
+            )
+
+            # respect_collisions defaults to true when the world is available.
+            respect = bool(body.get("respect_collisions", True))
+            collision_world = getattr(state, "collision_world", None) if respect else None
+
+            res = ik_math.position_ik(
+                state.chain, state.q, target_pos, target_R, state.profile,
+                tcp_offset_local=tcp_arr,
+                collision_world=collision_world,
+                chain_q_to_urdf=getattr(state, "chain_q_to_urdf", None),
+            )
+            # Write back so the GUI sees the new pose on next /state poll AND
+            # so successive gizmo drags compose continuously.
+            for jid, val in res.q.items():
+                if jid in state.q:
+                    state.q[jid] = float(val)
+
+            T_tip, _ = ik_math.fk(state.chain, state.q)
+            return {
+                "q": {jid: float(v) for jid, v in res.q.items()},
+                "converged": bool(res.converged),
+                "residual": float(res.residual),
+                "iterations": int(res.iterations),
+                "ee_pos": [float(v) for v in T_tip[:3, 3]],
+            }
 
         def _serve_file(self, rel: str, root: Path) -> None:
             # Clamp to `root` (prevent traversal via "../" etc.).
