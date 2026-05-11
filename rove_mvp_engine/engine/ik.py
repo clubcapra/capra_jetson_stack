@@ -27,8 +27,10 @@ forge-engine canonical form:
 `inverted` is consumed by both the engine's FK/Jacobian (so the
 solver matches the editor's behavior) and the morpher (which flips
 the sign of the per-joint velocity the engine emits before forwarding
-it to the real arm). There is no position-offset constant — IK is
-done in URDF-native joint coordinates throughout.
+it to the real arm). The project's home pose is baked into pre_xform
+at export time (see IKEngineExporter), so q=0 is the home pose and IK
+operates in "delta-from-home" coordinates throughout the engine — no
+runtime offset application is needed in this file.
 """
 
 from __future__ import annotations
@@ -152,12 +154,12 @@ def _axis_angle_to_R(axis: np.ndarray, angle: float) -> np.ndarray:
 def _joint_xform(j: JointSpec, q: float) -> np.ndarray:
     """Variable transform applied AT the joint axis.
 
-    `q` is the slider-space value (radians for revolute, meters for
-    prismatic) — what the IK works in. FK applies *only* the direction
-    flip: `actual = sign * q`. `offset` lives in chain.json for the
-    morpher to convert between real and slider space, but never enters
-    FK — adding it would deform the model and break IK convergence
-    when calibration is set.
+    `q` is the home-relative joint value (radians for revolute, meters
+    for prismatic) — what the IK works in. FK applies *only* the
+    direction flip: `actual = sign * q`. The project's home pose is
+    statically baked into pre_xform at export, so q=0 means home; the
+    morpher's encoder→engine conversion (encoder − home_deg) keeps the
+    real arm aligned with this convention.
     """
     actual = j.sign * q
     T = np.eye(4)

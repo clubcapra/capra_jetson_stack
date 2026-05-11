@@ -159,14 +159,19 @@ left the workspace; the residual tells you by how much.
 
 ## Initial pose
 
-On startup the engine seeds its internal `q` from the project's home
-pose (whatever you set with *File ▸ Set Home* in the editor), so the
-first IK solve and the debug UI both reflect where the real arm
-*actually* starts — not the URDF's stretched-out q=0 neutral.
+The project's home pose is **baked into this export** — both
+`data/chain.json`'s `pre_xform` matrices and the exported URDF's
+joint origins encode the home rotation as a static offset on each
+joint. The engine treats `q=0` as the home pose throughout, so the
+first IK solve, the debug UI, and the URDF render all reflect home
+until a `JointState` packet shifts `q`.
 
-The home pose lives in `data/ik_profile.json` under the `rest_pose`
-key. Edit that file to change the engine's default starting pose
-without re-exporting; restart `run.py` to pick it up.
+`data/ik_profile.json`'s `rest_pose` is therefore an all-zeros
+vector — it's still used as the null-space target for position IK
+on redundant chains. To change the engine's home without
+re-exporting, edit the bake by hand in `chain.json` (rotate the
+`pre_xform` for the joint you want to move) rather than touching
+`rest_pose`.
 
 ## Tuning
 

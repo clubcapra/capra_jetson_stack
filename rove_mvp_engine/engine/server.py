@@ -75,25 +75,18 @@ class State:
 def _make_state(chain_path: Path, profile_path: Path) -> State:
     chain = ik_math.load_chain(chain_path)
     profile = ik_math.load_profile(profile_path)
-    # Seed q with the project's home pose so the engine's view of the
-    # arm starts where the real arm actually starts (home), not at q=0
-    # (the URDF's stretched-out neutral). This matters before any
-    # JointState arrives — first IK solve runs against the right
-    # starting state, and the debug UI shows the robot at home
-    # rather than flat-out. The home pose is exported into
-    # ik_profile.json's `rest_pose` field by IKEngineExporter; edit
-    # that file to change the default without re-exporting.
+    # After IKEngineExporter's home-pose bake, q=0 IS the home pose:
+    # chain.json's pre_xform and the exported URDF both encode the
+    # project's home pose as a static rotation on each joint's origin.
+    # rest_pose is therefore an all-zeros vector over the chain joints
+    # (kept explicit so the null-space pull in position IK has a
+    # well-defined "home" to drive redundant DOFs toward). Seed q from
+    # rest_pose — for legacy exports without the bake this still pulls
+    # the right values; for current exports it's just zeros.
     q0 = {j.id: 0.0 for j in chain.movable}
-    seeded = 0
     for jid, v in (profile.rest_pose or {}).items():
         if jid in q0:
             q0[jid] = float(v)
-            seeded += 1
-    if seeded > 0:
-        _log.info(
-            "initial q seeded from home pose: %d / %d joints",
-            seeded, len(q0),
-        )
     return State(chain=chain, profile=profile, q=q0)
 
 

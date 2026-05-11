@@ -310,7 +310,7 @@
     <child link="Base" />
   </joint>
   <joint name="joint_revolute_10" type="revolute">
-    <origin xyz="-0.4 0.27 0.388" rpy="0 0 0" />
+    <origin xyz="-0.4 0.27 0.388" rpy="3.14159 2.65359e-06 3.14159" />
     <parent link="Base" />
     <child link="ASection_pivot" />
     <axis xyz="0 1 0" />
@@ -323,7 +323,7 @@
     <child link="ASection" />
   </joint>
   <joint name="joint_revolute_11" type="revolute">
-    <origin xyz="-0.7 0.255 0.378" rpy="0 0 0" />
+    <origin xyz="-0.7 0.255 0.378" rpy="3.14159 -2.65359e-06 3.14159" />
     <parent link="ASection" />
     <child link="JointA_pivot" />
     <axis xyz="0 -1 0" />
