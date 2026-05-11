@@ -30,7 +30,7 @@
   "joints": [
     {
       "id": "ent_joint_3e4dd248",
-      "name": "joint_revolute",
+      "name": "joint_revolute_10",
       "type": "revolute",
       "axis": [
         0.0,
@@ -96,7 +96,7 @@
     },
     {
       "id": "ent_joint_2c15d7d3",
-      "name": "joint_revolute",
+      "name": "joint_revolute_11",
       "type": "revolute",
       "axis": [
         0.0,
@@ -162,7 +162,7 @@
     },
     {
       "id": "ent_joint_d6fa25aa",
-      "name": "joint_revolute",
+      "name": "joint_revolute_12",
       "type": "revolute",
       "axis": [
         -1.0,
@@ -228,7 +228,7 @@
     },
     {
       "id": "ent_joint_577d5a5f",
-      "name": "joint_revolute",
+      "name": "joint_revolute_13",
       "type": "revolute",
       "axis": [
         0.0,
@@ -294,7 +294,7 @@
     },
     {
       "id": "ent_joint_3f0529c9",
-      "name": "joint_revolute",
+      "name": "joint_revolute_14",
       "type": "revolute",
       "axis": [
         -1.0,

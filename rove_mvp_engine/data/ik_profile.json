@@ -12,10 +12,10 @@
   "max_lin_vel": 0.25,
   "max_ang_vel": 1.0,
   "rest_pose": {
-    "ent_joint_3f0529c9": 0.0,
-    "ent_joint_d6fa25aa": 0.0,
+    "ent_joint_3e4dd248": 0.0,
     "ent_joint_2c15d7d3": 0.0,
     "ent_joint_577d5a5f": 0.0,
-    "ent_joint_3e4dd248": 0.0
+    "ent_joint_3f0529c9": 0.0,
+    "ent_joint_d6fa25aa": 0.0
   }
 }
